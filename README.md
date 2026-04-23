@@ -32,10 +32,6 @@ The central idea is a four-quadrant transition reward:
 
 This repository contains the core training code for ReCrit, including asynchronous vLLM rollout, transition-aware rewards, and a GRPO/PPO-clip style trainer.
 
-<div align="center">
-  <img src="assets/pipeline.png" width="88%" alt="ReCrit pipeline">
-</div>
-
 ## 🌟 Highlights
 
 - **Transition-aware objective**: ReCrit rewards or penalizes correctness transitions instead of collapsing all trajectories into final-answer accuracy.
@@ -44,15 +40,27 @@ This repository contains the core training code for ReCrit, including asynchrono
 - **GRPO-style optimization**: the trainer supports grouped advantages, PPO clipping, reference-model KL, auxiliary format rewards, and multi-GPU execution.
 - **Scientific reasoning focus**: the code is designed for scientific multiple-choice and short-answer settings with judge-based correctness signals.
 
-<div align="center">
-  <img src="assets/rollout.png" width="84%" alt="Dynamic asynchronous rollout">
-</div>
-
 ## 🧠 Method
 
 For each question, ReCrit first samples an Initial solution. It then injects a critic-style feedback prompt and samples a Critic solution. A judge maps both solutions to correctness labels, and the pair is assigned to one of the four transition quadrants. The training reward is computed from this transition rather than only from the final answer.
 
-The rollout engine supports variable completion times across samples. Once enough samples have completed the required critic interaction, training can proceed without waiting for every slow request to finish the maximum number of generated tokens.
+The training loop follows a sample-judge-update pipeline: sample trajectories from the current policy, assign quadrant rewards with a correctness judge, normalize rewards within GRPO groups, and update the policy with PPO-style clipping and KL regularization.
+
+<div align="center">
+  <img src="assets/pipeline.png" width="88%" alt="ReCrit training pipeline">
+</div>
+
+## ⚡ Dynamic Asynchronous Rollout
+
+Synchronous multi-turn rollout wastes GPU time because every sample must wait for the slowest generation before moving to the next stage. ReCrit instead uses asynchronous rollout so each sample can advance as soon as its current generation is complete. The dynamic variant further reduces tail waiting by stopping once the required fraction of samples has completed the critic interaction.
+
+<div align="center">
+  <img src="assets/rollout.png" width="88%" alt="Dynamic asynchronous rollout">
+</div>
+
+## 🔬 Case Study
+
+The examples below illustrate the target behavior: the model first gives an incorrect scientific answer, receives a verification-style critic prompt, then revises its reasoning and returns the correct final answer. These cases are shown only as qualitative examples; the training objective is still defined by the transition reward above.
 
 <div align="center">
   <img src="assets/case_study.png" width="88%" alt="ReCrit case study">
