@@ -9,6 +9,7 @@
 [![vLLM](https://img.shields.io/badge/vLLM-Rollout-7c3aed.svg)](https://github.com/vllm-project/vllm)
 [![License](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
 [![Status](https://img.shields.io/badge/Status-Research%20Code-orange.svg)](#)
+[![Project Page](https://img.shields.io/badge/Project-Page-111827.svg)](https://black-yt.github.io/ReCrit/)
 
 <img src="assets/teaser.png" width="92%" alt="ReCrit teaser">
 

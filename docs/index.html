@@ -1,0 +1,675 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="description" content="ReCrit: Inter-Turn Transition-Aware Reinforcement Learning for Scientific Critic Reasoning">
+  <title>ReCrit | Transition-Aware Critic Reasoning</title>
+  <style>
+    :root {
+      --ink: #101820;
+      --muted: #5f6975;
+      --paper: #fffaf0;
+      --panel: rgba(255, 255, 255, 0.78);
+      --line: rgba(16, 24, 32, 0.13);
+      --blue: #83c5ff;
+      --blue-deep: #0b5cad;
+      --green: #8ee3a2;
+      --green-deep: #137843;
+      --rose: #ff9fa5;
+      --rose-deep: #9f2137;
+      --amber: #ffd166;
+      --shadow: 0 24px 80px rgba(14, 26, 43, 0.14);
+      --radius: 28px;
+    }
+
+    * {
+      box-sizing: border-box;
+    }
+
+    html {
+      scroll-behavior: smooth;
+    }
+
+    body {
+      margin: 0;
+      color: var(--ink);
+      font-family: ui-serif, Georgia, "Times New Roman", serif;
+      background:
+        radial-gradient(circle at 8% 3%, rgba(131, 197, 255, 0.38), transparent 34rem),
+        radial-gradient(circle at 92% 6%, rgba(255, 209, 102, 0.42), transparent 30rem),
+        linear-gradient(135deg, #f9f1df 0%, #f7fbff 45%, #fff6f5 100%);
+      min-height: 100vh;
+    }
+
+    body::before {
+      content: "";
+      position: fixed;
+      inset: 0;
+      pointer-events: none;
+      opacity: 0.34;
+      background-image:
+        linear-gradient(rgba(16, 24, 32, 0.05) 1px, transparent 1px),
+        linear-gradient(90deg, rgba(16, 24, 32, 0.05) 1px, transparent 1px);
+      background-size: 42px 42px;
+    }
+
+    a {
+      color: inherit;
+      text-decoration: none;
+    }
+
+    .page {
+      width: min(1180px, calc(100% - 32px));
+      margin: 0 auto;
+      position: relative;
+      z-index: 1;
+    }
+
+    .nav {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 22px 0;
+      font-family: ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      font-size: 14px;
+      color: var(--muted);
+    }
+
+    .brand {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      font-weight: 800;
+      color: var(--ink);
+      letter-spacing: -0.02em;
+    }
+
+    .brand-mark {
+      width: 36px;
+      height: 36px;
+      border-radius: 12px;
+      background: linear-gradient(135deg, var(--blue), var(--green));
+      border: 1px solid rgba(16, 24, 32, 0.18);
+      box-shadow: 0 10px 30px rgba(11, 92, 173, 0.18);
+    }
+
+    .nav-links {
+      display: flex;
+      gap: 18px;
+      flex-wrap: wrap;
+    }
+
+    .nav-links a {
+      padding: 8px 10px;
+      border-radius: 999px;
+    }
+
+    .nav-links a:hover {
+      background: rgba(255, 255, 255, 0.68);
+    }
+
+    .hero {
+      padding: 52px 0 42px;
+      display: grid;
+      grid-template-columns: 1.02fr 0.98fr;
+      gap: 30px;
+      align-items: center;
+    }
+
+    .eyebrow {
+      display: inline-flex;
+      align-items: center;
+      gap: 10px;
+      padding: 9px 14px;
+      border: 1px solid var(--line);
+      border-radius: 999px;
+      background: rgba(255, 255, 255, 0.62);
+      font-family: ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      font-size: 13px;
+      font-weight: 700;
+      color: #334155;
+      backdrop-filter: blur(16px);
+    }
+
+    .dot {
+      width: 9px;
+      height: 9px;
+      border-radius: 50%;
+      background: var(--green-deep);
+      box-shadow: 0 0 0 6px rgba(19, 120, 67, 0.12);
+    }
+
+    h1 {
+      margin: 22px 0 18px;
+      max-width: 760px;
+      font-size: clamp(48px, 7vw, 88px);
+      line-height: 0.9;
+      letter-spacing: -0.07em;
+    }
+
+    .subtitle {
+      font-family: ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      font-size: clamp(18px, 2.2vw, 24px);
+      line-height: 1.55;
+      color: #394452;
+      margin: 0 0 28px;
+      max-width: 680px;
+    }
+
+    .cta-row, .pill-row {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 12px;
+      align-items: center;
+    }
+
+    .button {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      min-height: 46px;
+      padding: 0 18px;
+      border-radius: 999px;
+      font-family: ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      font-weight: 800;
+      border: 1px solid rgba(16, 24, 32, 0.16);
+      box-shadow: 0 16px 40px rgba(16, 24, 32, 0.08);
+    }
+
+    .button.primary {
+      background: #101820;
+      color: white;
+    }
+
+    .button.secondary {
+      background: rgba(255, 255, 255, 0.68);
+      color: var(--ink);
+    }
+
+    .hero-card {
+      padding: 20px;
+      border-radius: var(--radius);
+      background: rgba(255, 255, 255, 0.7);
+      border: 1px solid rgba(16, 24, 32, 0.12);
+      box-shadow: var(--shadow);
+      backdrop-filter: blur(18px);
+    }
+
+    .hero-card img {
+      width: 100%;
+      display: block;
+      border-radius: 18px;
+      border: 1px solid rgba(16, 24, 32, 0.12);
+      background: white;
+    }
+
+    .section {
+      padding: 62px 0;
+    }
+
+    .section-header {
+      display: grid;
+      grid-template-columns: 0.72fr 1fr;
+      gap: 26px;
+      align-items: end;
+      margin-bottom: 24px;
+    }
+
+    h2 {
+      margin: 0;
+      font-size: clamp(34px, 4.5vw, 56px);
+      line-height: 0.98;
+      letter-spacing: -0.055em;
+    }
+
+    .section-lead {
+      margin: 0;
+      color: var(--muted);
+      font-family: ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      font-size: 17px;
+      line-height: 1.7;
+    }
+
+    .grid {
+      display: grid;
+      gap: 18px;
+    }
+
+    .grid.three {
+      grid-template-columns: repeat(3, 1fr);
+    }
+
+    .grid.two {
+      grid-template-columns: repeat(2, 1fr);
+    }
+
+    .card {
+      background: var(--panel);
+      border: 1px solid var(--line);
+      border-radius: 24px;
+      padding: 24px;
+      box-shadow: 0 18px 55px rgba(16, 24, 32, 0.08);
+      backdrop-filter: blur(18px);
+    }
+
+    .card h3 {
+      margin: 0 0 10px;
+      font-size: 24px;
+      letter-spacing: -0.03em;
+    }
+
+    .card p {
+      margin: 0;
+      color: var(--muted);
+      font-family: ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      line-height: 1.65;
+      font-size: 15.5px;
+    }
+
+    .quadrant {
+      display: grid;
+      grid-template-columns: repeat(2, 1fr);
+      gap: 12px;
+    }
+
+    .quad {
+      min-height: 138px;
+      border-radius: 22px;
+      padding: 18px;
+      border: 1px solid rgba(16, 24, 32, 0.13);
+    }
+
+    .quad strong {
+      display: block;
+      font-size: 22px;
+      margin-bottom: 8px;
+      letter-spacing: -0.03em;
+    }
+
+    .quad span {
+      display: block;
+      color: #334155;
+      font-family: ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      line-height: 1.5;
+      font-size: 14px;
+    }
+
+    .q-correction { background: linear-gradient(135deg, rgba(142, 227, 162, 0.82), rgba(255, 255, 255, 0.72)); }
+    .q-robust { background: linear-gradient(135deg, rgba(131, 197, 255, 0.78), rgba(255, 255, 255, 0.72)); }
+    .q-syco { background: linear-gradient(135deg, rgba(255, 159, 165, 0.86), rgba(255, 255, 255, 0.72)); }
+    .q-boundary { background: linear-gradient(135deg, rgba(255, 209, 102, 0.72), rgba(255, 255, 255, 0.72)); }
+
+    .figure {
+      background: rgba(255, 255, 255, 0.78);
+      border: 1px solid var(--line);
+      border-radius: var(--radius);
+      padding: 18px;
+      box-shadow: var(--shadow);
+    }
+
+    .figure img {
+      width: 100%;
+      display: block;
+      border-radius: 18px;
+      background: white;
+    }
+
+    .caption {
+      margin: 14px 4px 0;
+      color: var(--muted);
+      font-family: ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      font-size: 14px;
+      line-height: 1.55;
+    }
+
+    .metric-strip {
+      display: grid;
+      grid-template-columns: repeat(4, 1fr);
+      gap: 16px;
+      margin-bottom: 18px;
+    }
+
+    .metric {
+      border-radius: 24px;
+      background: rgba(255, 255, 255, 0.78);
+      border: 1px solid var(--line);
+      padding: 22px;
+      box-shadow: 0 18px 55px rgba(16, 24, 32, 0.08);
+    }
+
+    .metric .label {
+      font-family: ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      color: var(--muted);
+      font-size: 13px;
+      font-weight: 800;
+      text-transform: uppercase;
+      letter-spacing: 0.08em;
+    }
+
+    .metric .value {
+      margin-top: 8px;
+      font-size: 38px;
+      letter-spacing: -0.055em;
+      font-weight: 900;
+    }
+
+    .metric .note {
+      margin-top: 4px;
+      color: var(--muted);
+      font-family: ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      font-size: 14px;
+    }
+
+    table {
+      width: 100%;
+      border-collapse: separate;
+      border-spacing: 0;
+      overflow: hidden;
+      border-radius: 24px;
+      border: 1px solid var(--line);
+      background: rgba(255, 255, 255, 0.8);
+      box-shadow: var(--shadow);
+      font-family: ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    }
+
+    th, td {
+      padding: 15px 16px;
+      text-align: left;
+      border-bottom: 1px solid rgba(16, 24, 32, 0.1);
+    }
+
+    th {
+      background: rgba(16, 24, 32, 0.92);
+      color: white;
+      font-size: 13px;
+      letter-spacing: 0.05em;
+      text-transform: uppercase;
+    }
+
+    td {
+      font-size: 15px;
+      color: #263241;
+    }
+
+    tr:last-child td {
+      border-bottom: 0;
+    }
+
+    .best {
+      font-weight: 900;
+      color: var(--green-deep);
+    }
+
+    .mono {
+      font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace;
+    }
+
+    .footer {
+      padding: 42px 0 60px;
+      color: var(--muted);
+      font-family: ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      font-size: 14px;
+      text-align: center;
+    }
+
+    @media (max-width: 900px) {
+      .hero, .section-header, .grid.three, .grid.two, .metric-strip {
+        grid-template-columns: 1fr;
+      }
+
+      .nav {
+        align-items: flex-start;
+        gap: 16px;
+        flex-direction: column;
+      }
+
+      .quadrant {
+        grid-template-columns: 1fr;
+      }
+
+      table {
+        display: block;
+        overflow-x: auto;
+        white-space: nowrap;
+      }
+    }
+  </style>
+</head>
+<body>
+  <main class="page">
+    <nav class="nav" aria-label="Primary navigation">
+      <a class="brand" href="#">
+        <span class="brand-mark" aria-hidden="true"></span>
+        <span>ReCrit</span>
+      </a>
+      <div class="nav-links">
+        <a href="#idea">Idea</a>
+        <a href="#method">Method</a>
+        <a href="#results">Results</a>
+        <a href="#case">Case Study</a>
+        <a href="https://github.com/black-yt/ReCrit">Code</a>
+      </div>
+    </nav>
+
+    <section class="hero">
+      <div>
+        <span class="eyebrow"><span class="dot"></span> Scientific critic reasoning</span>
+        <h1>ReCrit learns when criticism should change an answer.</h1>
+        <p class="subtitle">
+          ReCrit is an inter-turn transition-aware reinforcement learning framework for scientific reasoning. It separates useful correction from harmful sycophancy by rewarding how an answer changes from the Initial solution to the Critic solution.
+        </p>
+        <div class="cta-row">
+          <a class="button primary" href="https://github.com/black-yt/ReCrit">View Code</a>
+          <a class="button secondary" href="#results">See Results</a>
+        </div>
+      </div>
+      <div class="hero-card">
+        <img src="assets/teaser.png" alt="ReCrit teaser showing critical reasoning and four transition quadrants">
+      </div>
+    </section>
+
+    <section id="idea" class="section">
+      <div class="section-header">
+        <h2>From final accuracy to transition awareness.</h2>
+        <p class="section-lead">
+          A critic interaction is not just a final answer. ReCrit measures whether feedback repairs an initially wrong solution, preserves an initially correct one, or causes the model to abandon a correct answer.
+        </p>
+      </div>
+      <div class="grid two">
+        <div class="card">
+          <h3>Why critic reasoning is hard</h3>
+          <p>
+            Scientific tasks require the model to inspect evidence, not merely follow the user's tone. A helpful critic should trigger grounded re-analysis, while misleading criticism should not overwrite a correct conclusion.
+          </p>
+        </div>
+        <div class="card quadrant">
+          <div class="quad q-correction">
+            <strong>Correction</strong>
+            <span>Initial wrong, Critic correct. Reward useful revision.</span>
+          </div>
+          <div class="quad q-robust">
+            <strong>Robustness</strong>
+            <span>Initial correct, Critic correct. Reward stable reasoning.</span>
+          </div>
+          <div class="quad q-boundary">
+            <strong>Boundary</strong>
+            <span>Initial wrong, Critic wrong. Apply a mild boundary penalty.</span>
+          </div>
+          <div class="quad q-syco">
+            <strong>Sycophancy</strong>
+            <span>Initial correct, Critic wrong. Penalize harmful answer switching.</span>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <section id="method" class="section">
+      <div class="section-header">
+        <h2>A transition-aware RL pipeline.</h2>
+        <p class="section-lead">
+          ReCrit samples Initial and Critic solutions, judges both, maps the correctness transition into a quadrant reward, and updates the policy with GRPO-style grouped advantages.
+        </p>
+      </div>
+      <div class="figure">
+        <img src="assets/pipeline.png" alt="ReCrit training pipeline">
+        <p class="caption">
+          The training pipeline injects critic feedback with multiple attitudes, evaluates Initial-to-Critic correctness transitions, and uses intra-group advantages to update the policy.
+        </p>
+      </div>
+    </section>
+
+    <section class="section">
+      <div class="section-header">
+        <h2>Rollout without tail waiting.</h2>
+        <p class="section-lead">
+          Multi-turn rollout can be slow when a batch waits for the longest generation. Dynamic asynchronous rollout lets completed samples advance immediately and uses tail-adaptive completion to reduce waiting bubbles.
+        </p>
+      </div>
+      <div class="figure">
+        <img src="assets/rollout.png" alt="Synchronous, asynchronous, and dynamic asynchronous rollout comparison">
+        <p class="caption">
+          Compared with synchronous rollout, asynchronous scheduling reduces GPU waiting bubbles. Tail-adaptive completion further trims slow tails while preserving valid critic transitions.
+        </p>
+      </div>
+    </section>
+
+    <section id="results" class="section">
+      <div class="section-header">
+        <h2>Core benchmark results.</h2>
+        <p class="section-lead">
+          ReCrit improves final Critic accuracy on three closed-form scientific reasoning benchmarks: ChemBench, TRQA, and EarthSE. Gains are reported as percentage points.
+        </p>
+      </div>
+
+      <div class="metric-strip">
+        <div class="metric">
+          <div class="label">4B Average Critic</div>
+          <div class="value">51.49</div>
+          <div class="note">Base Model: 38.15</div>
+        </div>
+        <div class="metric">
+          <div class="label">4B Average Gain</div>
+          <div class="value">+13.58</div>
+          <div class="note">Across ChemBench, TRQA, EarthSE</div>
+        </div>
+        <div class="metric">
+          <div class="label">9B Average Critic</div>
+          <div class="value">55.59</div>
+          <div class="note">Base Model: 45.40</div>
+        </div>
+        <div class="metric">
+          <div class="label">9B Average Gain</div>
+          <div class="value">+8.97</div>
+          <div class="note">Across ChemBench, TRQA, EarthSE</div>
+        </div>
+      </div>
+
+      <table aria-label="ReCrit benchmark results">
+        <thead>
+          <tr>
+            <th>Model</th>
+            <th>Benchmark</th>
+            <th>Initial</th>
+            <th>Gain</th>
+            <th>+Correction-Sycophancy</th>
+            <th>Critic</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td>Qwen3.5-4B</td>
+            <td>ChemBench</td>
+            <td>50.50</td>
+            <td class="best">+10.50</td>
+            <td>+16.50-6.00</td>
+            <td class="best">61.00</td>
+          </tr>
+          <tr>
+            <td>Qwen3.5-4B</td>
+            <td>TRQA</td>
+            <td>24.42</td>
+            <td class="best">+11.05</td>
+            <td>+18.02-6.98</td>
+            <td class="best">35.47</td>
+          </tr>
+          <tr>
+            <td>Qwen3.5-4B</td>
+            <td>EarthSE</td>
+            <td>38.80</td>
+            <td class="best">+19.20</td>
+            <td>+22.80-3.60</td>
+            <td class="best">58.00</td>
+          </tr>
+          <tr>
+            <td>Qwen3.5-9B</td>
+            <td>ChemBench</td>
+            <td>61.50</td>
+            <td class="best">+8.00</td>
+            <td>+12.50-4.50</td>
+            <td class="best">69.50</td>
+          </tr>
+          <tr>
+            <td>Qwen3.5-9B</td>
+            <td>TRQA</td>
+            <td>31.98</td>
+            <td class="best">+9.30</td>
+            <td>+14.53-5.23</td>
+            <td class="best">41.28</td>
+          </tr>
+          <tr>
+            <td>Qwen3.5-9B</td>
+            <td>EarthSE</td>
+            <td>46.40</td>
+            <td class="best">+9.60</td>
+            <td>+13.60-4.00</td>
+            <td class="best">56.00</td>
+          </tr>
+        </tbody>
+      </table>
+    </section>
+
+    <section id="case" class="section">
+      <div class="section-header">
+        <h2>Concrete correction behavior.</h2>
+        <p class="section-lead">
+          The qualitative examples show the desired interaction pattern: the critic does not reveal the answer, but asks for verification; ReCrit identifies the weak premise and revises only when the re-analysis supports a change.
+        </p>
+      </div>
+      <div class="figure">
+        <img src="assets/case_study.png" alt="Two scientific correction examples">
+        <p class="caption">
+          ChemBench and EarthSE examples where the Initial solution is plausible but wrong, while the Critic solution performs grounded verification and corrects the final answer.
+        </p>
+      </div>
+    </section>
+
+    <section class="section">
+      <div class="section-header">
+        <h2>Use the research code.</h2>
+        <p class="section-lead">
+          The repository provides the training loop, reward implementation, asynchronous rollout code, launch script, and lightweight tests needed to reproduce and extend ReCrit-style critic training.
+        </p>
+      </div>
+      <div class="grid three">
+        <div class="card">
+          <h3>Install</h3>
+          <p class="mono">pip install -r requirements.txt</p>
+        </div>
+        <div class="card">
+          <h3>Train</h3>
+          <p class="mono">bash run.sh</p>
+        </div>
+        <div class="card">
+          <h3>Inspect</h3>
+          <p class="mono">reward.py · rollout.py · trainer.py</p>
+        </div>
+      </div>
+    </section>
+
+    <footer class="footer">
+      ReCrit · Inter-Turn Transition-Aware Reinforcement Learning for Scientific Critic Reasoning
+    </footer>
+  </main>
+</body>
+</html>
