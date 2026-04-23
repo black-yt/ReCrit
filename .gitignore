@@ -51,6 +51,17 @@ coverage.xml
 .pytest_cache/
 cover/
 
+# ReCrit runtime artifacts
+output/
+outputs/
+runs/
+checkpoints/
+*.jsonl
+*.safetensors
+*.pt
+*.pth
+events.out.tfevents*
+
 # Translations
 *.mo
 *.pot
