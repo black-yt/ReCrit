@@ -1,4 +1,9 @@
-""
+"""
+Test how vLLM reports logprobs for stop tokens.
+
+Specifically checks whether, with stop_token_ids=[im_end_id], vLLM includes the
+stop token in both seq.token_ids and seq.logprobs.
+"""
 
 import argparse
 import os

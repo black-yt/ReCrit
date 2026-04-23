@@ -1,4 +1,14 @@
-""
+"""
+ReCrit reward computation module.
+
+This file mirrors the reward design in plugin/rewards.py and contains:
+  1. compute_critic_rewards()       - four-quadrant main reward
+  2. compute_repetition_rewards()   - multi-turn n-gram repetition penalty
+  3. compute_overlong_rewards()     - multi-turn soft overlength penalty
+  4. compute_think_format_rewards() - multi-turn <think> format reward
+  5. compute_all_rewards()          - aggregate all reward terms into "reward"
+  6. compute_grpo_advantages()      - group-normalized GRPO advantages
+"""
 
 import logging
 from typing import List, Dict
@@ -8,7 +18,7 @@ import torch
 
 logger = logging.getLogger(__name__)
 
-
+# -- structai imports --------------------------------------------------------
 try:
     from structai import Judge, multi_thread, prompts
     from structai import parse_think_answer
@@ -19,7 +29,7 @@ except Exception as e:
 
 
 def _default_critic_fields(r: dict) -> None:
-    ""
+    """Fill default critic fields when Judge is unavailable or evaluation fails."""
     n_pairs = max(len(r.get("responses", [])) - 1, 0)
     r["correctness"] = [False] * len(r.get("responses", []))
     r["quadrant_pairs"] = ["Boundary"] * n_pairs
@@ -28,7 +38,7 @@ def _default_critic_fields(r: dict) -> None:
 
 def _create_judges(model_version: str = "gemini-3-flash-preview-nothinking",
                    time_limit: int = 120):
-    ""
+    """Create and cache the close/open Judge instances on first use."""
     if not hasattr(_create_judges, "_judges"):
         _create_judges._judges = (
             Judge(model_version=model_version, time_limit=time_limit, use_tqdm=False),
@@ -42,29 +52,22 @@ def _create_judges(model_version: str = "gemini-3-flash-preview-nothinking",
             ),
         )
     return _create_judges._judges
-
-
-
-
-
-
-
+# ---------------------------------------------------------------------------
+# Multi-turn helpers
+# ---------------------------------------------------------------------------
 def _collect_turn_answers(r: dict) -> List[str]:
-    ""
+    """Return the text responses from all turns."""
     return list(r["responses"])
 
 
 def _collect_turn_token_lengths(r: dict) -> List[int]:
-    ""
+    """Return the token lengths of all turns."""
     return [len(ids) for ids in r["token_ids"]]
-
-
-
-
-
-
+# ---------------------------------------------------------------------------
+# 1. Four-quadrant main reward
+# ---------------------------------------------------------------------------
 def _is_correct(result: dict, idx: int) -> bool:
-    ""
+    """Return whether the idx-th answer is correct according to Judge output."""
     math_list = result.get("math_verify_list") or []
     llm_list  = result.get("llm_judge_list")  or []
 
@@ -83,7 +86,12 @@ def compute_critic_rewards(
     judge_model: str = "gemini-3-flash-preview-nothinking",
     num_turns: int = 2,
 ) -> None:
-    ""
+    """
+    Evaluate all turns with structai Judge and compute the chained four-quadrant reward.
+
+    The reward is written in place into each result dict as:
+        correctness, quadrant_pairs, critic_reward
+    """
     n = len(results)
 
     if not HAS_JUDGE or n == 0:
@@ -195,13 +203,13 @@ def compute_critic_rewards(
 
 
 def _zipngram(text: str, ngram_size: int):
-    ""
+    """Return the zipped n-gram iterator used by the repetition penalty."""
     words = text.lower().split()
     return zip(*[words[i:] for i in range(ngram_size)])
 
 
 def _single_turn_repetition_reward(completion: str, ngram_size: int) -> float:
-    ""
+    """Compute the repetition penalty for one turn in the range [-1.0, 0.0]."""
     if completion == "" or len(completion.split()) < ngram_size:
         return 0.0
     ngrams = set()
@@ -217,7 +225,7 @@ def compute_repetition_rewards(
     results: List[Dict],
     ngram_size: int = 8,
 ) -> None:
-    ""
+    """Average the per-turn repetition penalty into result['repetition_penalty']."""
     for r in results:
         all_answers = _collect_turn_answers(r)
         turn_rewards = [
@@ -232,7 +240,7 @@ def compute_repetition_rewards(
 
 
 def _single_turn_overlong_penalty(length: int, soft_max_length: int, soft_cache_length: int) -> float:
-    ""
+    """Compute the soft overlength penalty for one turn."""
     expected_len = soft_max_length - soft_cache_length
     exceed_len = length - expected_len
     return max(min(-exceed_len / soft_cache_length, 0.0), -1.0)
@@ -243,7 +251,7 @@ def compute_overlong_rewards(
     soft_max_length: int = 4096,
     soft_cache_length: int = 1024,
 ) -> None:
-    ""
+    """Average the per-turn overlength penalty into result['overlong_penalty']."""
     for r in results:
         lengths = _collect_turn_token_lengths(r)
         if not lengths:
@@ -261,7 +269,7 @@ def compute_overlong_rewards(
 
 
 def _check_think_format(text: str) -> bool:
-    ""
+    """Check whether one response follows the required <think>...</think> format."""
     if not (
         text.count("<think>") == 1
         and text.count("</think>") == 1
@@ -278,7 +286,7 @@ def _check_think_format(text: str) -> bool:
 
 
 def compute_think_format_rewards(results: List[Dict]) -> None:
-    ""
+    """Score each trajectory by the fraction of turns that satisfy the think format."""
     for r in results:
         all_answers = _collect_turn_answers(r)
         if not all_answers:
@@ -293,7 +301,7 @@ def compute_think_format_rewards(results: List[Dict]) -> None:
 
 
 def compute_all_rewards(results: List[Dict], config) -> List[Dict]:
-    ""
+    """Run all reward functions and sum them into result['reward']."""
 
     compute_critic_rewards(
         results,
@@ -338,7 +346,7 @@ def compute_all_rewards(results: List[Dict], config) -> List[Dict]:
 
 
 def compute_grpo_advantages(results: List[Dict], num_generations: int) -> List[Dict]:
-    ""
+    """Compute group-normalized GRPO advantages for each prompt group."""
     n_total = len(results)
     assert n_total % num_generations == 0, (
         f"results length ({n_total}) must be divisible by num_generations ({num_generations})"
@@ -360,7 +368,7 @@ def compute_grpo_advantages(results: List[Dict], num_generations: int) -> List[D
 
 
 def recompute_advantages_on_kept(kept_results: List[Dict]) -> None:
-    ""
+    """Recompute advantages after overlong samples are dropped from training."""
     groups: dict = defaultdict(list)
     for r in kept_results:
         groups[r["prompt_idx"]].append(r)
@@ -383,7 +391,7 @@ def recompute_advantages_on_kept(kept_results: List[Dict]) -> None:
 
 
 def quadrant_stats(results: List[Dict]) -> Dict:
-    ""
+    """Summarize quadrant ratios and reward statistics for training-time logging."""
 
     all_quadrants = []
     for r in results:

@@ -1,4 +1,6 @@
-""
+"""
+Validate _find_bridge() by extracting the bridge token IDs between two turns.
+"""
 
 import argparse
 import sys
@@ -10,6 +12,7 @@ from rollout import _find_bridge
 
 
 def test_bridge_alignment(model_path: str) -> bool:
+    """Check bridge extraction across multiple turn-1 / critic-message combinations."""
     from transformers import AutoTokenizer
 
     print(f"Loading tokenizer from {model_path} ...")

@@ -1,4 +1,9 @@
-""
+"""
+Utility helpers for ReCrit.
+
+Includes logging, run-directory management, distributed initialization, model
+loading, optimizer/scheduler creation, checkpointing, and metric logging.
+"""
 
 import os
 import math
@@ -14,26 +19,20 @@ from torch.nn.parallel import DistributedDataParallel as DDP
 from transformers import AutoModelForCausalLM, get_cosine_schedule_with_warmup
 
 logger = logging.getLogger(__name__)
-
-
-
-
-
-
+# ---------------------------------------------------------------------------
+# Logging
+# ---------------------------------------------------------------------------
 def setup_file_logging(log_path: str):
-    ""
+    """Mirror all logger output into a file while keeping terminal logging."""
     fh = logging.FileHandler(log_path, mode="a", encoding="utf-8")
     fh.setLevel(logging.DEBUG)
     fh.setFormatter(logging.Formatter("[%(asctime)s][%(levelname)s][%(name)s] %(message)s"))
     logging.getLogger().addHandler(fh)
-
-
-
-
-
-
+# ---------------------------------------------------------------------------
+# Run directory management
+# ---------------------------------------------------------------------------
 def make_run_dir(base_dir: str) -> str:
-    ""
+    """Create a versioned run directory under base_dir: vXXX_YYYYMMDD_HHMMSS."""
     base = Path(base_dir)
     base.mkdir(parents=True, exist_ok=True)
     existing = [d.name for d in base.iterdir()
@@ -43,19 +42,16 @@ def make_run_dir(base_dir: str) -> str:
     run_dir = base / f"v{max_ver + 1:03d}_{ts}"
     run_dir.mkdir(parents=True, exist_ok=True)
     return str(run_dir)
-
-
-
-
-
-
+# ---------------------------------------------------------------------------
+# Distributed helpers
+# ---------------------------------------------------------------------------
 def setup_ddp():
-    ""
+    """Initialize torch.distributed using the standard RANK/WORLD_SIZE env vars."""
     rank = int(os.environ.get("RANK", 0))
     local_rank = int(os.environ.get("LOCAL_RANK", 0))
     world_size = int(os.environ.get("WORLD_SIZE", 1))
 
-    torch.cuda.set_device(local_rank)
+    torch.cuda.set_device(local_rank)  # Bind .cuda() calls to the current rank's device.
 
     if world_size > 1:
         dist.init_process_group(backend="nccl")
@@ -71,7 +67,7 @@ def is_main_process() -> bool:
 
 
 def broadcast_string(s: str) -> str:
-    ""
+    """Broadcast a UTF-8 string from rank 0 to all processes."""
     if not dist.is_available() or not dist.is_initialized() or dist.get_world_size() == 1:
         return s
     if is_main_process():
@@ -88,14 +84,11 @@ def broadcast_string(s: str) -> str:
     if not is_main_process():
         s = bytes(tensor.cpu().numpy().tobytes()).decode("utf-8")
     return s
-
-
-
-
-
-
+# ---------------------------------------------------------------------------
+# Model and vLLM initialization
+# ---------------------------------------------------------------------------
 def load_training_model(config, local_rank: int, world_size: int) -> torch.nn.Module:
-    ""
+    """Load the trainable model and wrap it in DDP when world_size > 1."""
     logger.info(f"[Model] Loading {config.model_path} ...")
 
     dtype = torch.bfloat16 if config.bf16 else torch.float32
@@ -119,7 +112,15 @@ def load_training_model(config, local_rank: int, world_size: int) -> torch.nn.Mo
 
 
 def load_reference_model(config, local_rank: int) -> torch.nn.Module:
-    ""
+    """
+    Load the frozen reference model used for KL regularization.
+
+    It shares the same checkpoint as the training model, but:
+      - is never wrapped in DDP,
+      - does not enable gradient checkpointing,
+      - has requires_grad=False on every parameter,
+      - is moved between GPU and CPU across rollout/training phases.
+    """
     logger.info(f"[RefModel] Loading frozen reference model from {config.model_path} ...")
 
     dtype = torch.bfloat16 if config.bf16 else torch.float32
@@ -139,7 +140,13 @@ def load_reference_model(config, local_rank: int) -> torch.nn.Module:
 
 
 def load_vllm_engine(config):
-    ""
+    """
+    Initialize the vLLM engine in sleep mode and wake it later for rollout.
+
+    In multi-GPU mode each rank calls this independently. Because run.sh
+    restricts CUDA_VISIBLE_DEVICES to one GPU per process, each vLLM engine
+    automatically binds to the correct physical device.
+    """
     from vllm import LLM
     from rollout import vllm_sleep
 
@@ -154,17 +161,13 @@ def load_vllm_engine(config):
         enable_sleep_mode=True,
         trust_remote_code=True,
     )
-
-
+    # Immediately release vLLM GPU memory until the first rollout call.
     vllm_sleep(llm, level=1)
     logger.info("[vLLM] Engine initialized and sleeping.")
     return llm
-
-
-
-
-
-
+# ---------------------------------------------------------------------------
+# Optimizer and scheduler
+# ---------------------------------------------------------------------------
 def build_optimizer_scheduler(model, config, total_steps: int):
     no_decay = {"bias", "LayerNorm.weight", "layer_norm.weight", "layernorm.weight", "norm.weight"}
     param_groups = [
@@ -185,14 +188,17 @@ def build_optimizer_scheduler(model, config, total_steps: int):
         num_training_steps=total_steps,
     )
     return optimizer, scheduler
-
-
-
-
-
-
+# ---------------------------------------------------------------------------
+# Checkpointing
+# ---------------------------------------------------------------------------
 def save_checkpoint(model, tokenizer, optimizer, scheduler, epoch, step, config):
-    ""
+    """
+    Save a checkpoint in an ms-swift-compatible format.
+
+    The saved checkpoint keeps the multimodal base-model structure by combining
+    trainable LLM weights with the untouched visual encoder weights from the base
+    checkpoint and then shards the result into safetensors files.
+    """
     if not is_main_process():
         return
     if config.save_total_limit == 0:
@@ -202,8 +208,8 @@ def save_checkpoint(model, tokenizer, optimizer, scheduler, epoch, step, config)
     from safetensors import safe_open
     from safetensors.torch import save_file
     from huggingface_hub import split_torch_state_dict_into_shards
-
-
+    # Keep only the newest save_total_limit - 1 checkpoint directories before
+    # writing the next one.
     if config.save_total_limit > 0:
         ckpt_dirs = sorted(
             [d for d in Path(config.output_dir).iterdir()
@@ -219,14 +225,12 @@ def save_checkpoint(model, tokenizer, optimizer, scheduler, epoch, step, config)
 
     out = Path(config.output_dir) / f"checkpoint-epoch{epoch}-step{step}"
     out.mkdir(parents=True, exist_ok=True)
-
-
+    # Extract the training model state dict.
     raw = model.module if hasattr(model, "module") else model
 
 
 
-
-
+    # If the base checkpoint is sharded, keep only keys belonging to the base model.
     base_path = Path(config.model_path)
     base_index_path = base_path / "model.safetensors.index.json"
 
@@ -244,8 +248,7 @@ def save_checkpoint(model, tokenizer, optimizer, scheduler, epoch, step, config)
     else:
         state_dict = {k: v.cpu() for k, v in full_sd.items()}
     n_llm = len(state_dict)
-
-
+    # Load the untouched visual encoder weights from the base checkpoint.
     if base_index_path.exists():
         visual_shards = set()
         for key, shard_file in base_index["weight_map"].items():
@@ -328,7 +331,7 @@ def get_writer(log_dir: str):
 
 
 def fmt_duration(seconds: float) -> str:
-    ""
+    """Format seconds into a readable duration such as '2h 05m' or '1d 3h 12m'."""
     d, rem = divmod(int(seconds), 86400)
     h, rem = divmod(rem, 3600)
     m = rem // 60

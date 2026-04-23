@@ -1,4 +1,6 @@
-""
+"""
+Validate the logits_to_keep optimization used in compute_policy_logps().
+"""
 
 import argparse
 import torch
@@ -7,6 +9,7 @@ from transformers import AutoModelForCausalLM, AutoTokenizer
 
 
 def compute_logps_full(model, input_ids, labels, attention_mask, temperature=1.0):
+    """Full computation that does not skip the prompt region."""
     with torch.amp.autocast("cuda", enabled=True, dtype=torch.bfloat16):
         outputs = model(input_ids=input_ids, attention_mask=attention_mask, use_cache=False)
 
@@ -30,6 +33,7 @@ def compute_logps_full(model, input_ids, labels, attention_mask, temperature=1.0
 
 
 def compute_logps_optimized(model, input_ids, labels, attention_mask, temperature=1.0):
+    """Optimized computation matching trainer.py::compute_policy_logps."""
     logits_to_keep = (
         labels.shape[-1] - (torch.ne(labels, -100).int().argmax(-1))
     ).max().item()
@@ -59,6 +63,7 @@ def compute_logps_optimized(model, input_ids, labels, attention_mask, temperatur
 
 
 def make_test_batch(tokenizer, device):
+    """Construct a toy batch with prompts and completions of different lengths."""
     prompt1 = "What is 2+2?"
     completion1 = "The answer is 4. This is a basic arithmetic problem."
 

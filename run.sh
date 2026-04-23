@@ -1,9 +1,13 @@
 #!/bin/bash
 set -euo pipefail
 
-# User configuration.
+# ============================================================
+# User configuration (edit as needed)
+# ============================================================
 export LLM_API_KEY="${LLM_API_KEY:-YOUR_LLM_API_KEY}"
 export LLM_BASE_URL="${LLM_BASE_URL:-https://your-judge-endpoint/v1}"
+
+# Visible GPU IDs. Use one ID for single-GPU and a comma-separated list for multi-GPU.
 export CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-0,1}"
 
 MODEL_PATH="${MODEL_PATH:-/path/to/model}"
@@ -15,6 +19,13 @@ mkdir -p "${OUTPUT_DIR}"
 IFS=',' read -ra _GPUS <<< "${CUDA_VISIBLE_DEVICES}"
 WORLD_SIZE=${#_GPUS[@]}
 
+#
+# Recommended defaults:
+#   --judge_mode both              # dataset must include judge_mode when using both
+#   --completion_ratio 0.75        # async rollout early-stop threshold (1.0 = fully synchronous)
+#   --vllm_gpu_memory_utilization 0.22
+#   --kl_beta 0.04                 # KL anchor to the initial SFT model
+#   --train_micro_batch_size 1     # use when large models risk OOM
 TRAIN_ARGS=(
     --model_path          "${MODEL_PATH}"
     --train_dataset       "${TRAIN_DATASET}"
@@ -57,6 +68,8 @@ else
     export MASTER_ADDR=127.0.0.1
     export MASTER_PORT="${MASTER_PORT:-29500}"
 
+    # Each rank only sees one GPU through CUDA_VISIBLE_DEVICES, so both vLLM
+    # and the training model stay on cuda:0 inside that process.
     PIDS=()
     for ((rank=0; rank<WORLD_SIZE; rank++)); do
         CUDA_VISIBLE_DEVICES=${_GPUS[$rank]} \

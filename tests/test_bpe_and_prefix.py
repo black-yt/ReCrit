@@ -1,4 +1,10 @@
-""
+"""
+Test BPE consistency and the correctness of _detect_generation_prefix().
+
+Checks:
+  1. Whether prompt_ids[0] + resp_ids[0] matches the prefix of prompt_ids[1]
+  2. Whether _detect_generation_prefix correctly extracts any extra generation suffix
+"""
 
 import argparse
 import sys
@@ -12,6 +18,7 @@ SEP = "=" * 60
 
 
 def test_detect_generation_prefix(tokenizer, system_prompt="You are a helpful assistant."):
+    """Validate _detect_generation_prefix() on the current tokenizer."""
     from rollout import _detect_generation_prefix
 
     print(f"\n{SEP}")
@@ -66,6 +73,7 @@ def test_detect_generation_prefix(tokenizer, system_prompt="You are a helpful as
 
 
 def test_bpe_consistency(tokenizer, system_prompt="You are a helpful assistant."):
+    """Compare concatenation-based tokenization against whole-sequence tokenization."""
     print(f"\n{SEP}")
     print("2. BPE consistency test (_find_bridge prerequisite)")
     print(SEP)

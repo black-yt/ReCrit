@@ -1,4 +1,11 @@
-""
+"""
+ReCrit rollout module.
+
+Responsibilities:
+  1. Run N-turn asynchronous rollout with vLLM
+  2. Synchronize training-model weights into vLLM
+  3. Convert rollout outputs into a PyTorch training batch
+"""
 
 import random
 import logging
@@ -12,11 +19,7 @@ import torch
 import torch.nn as nn
 
 logger = logging.getLogger(__name__)
-
-
-
-
-
+# -- Critic prompt templates -------------------------------------------------
 ATTITUDE_TEMPLATES: Dict[str, List[str]] = {
     "opposing": [
         "Your answer seems to have some issues. Could you reconsider it carefully?",
@@ -51,22 +54,15 @@ _ATTITUDES = list(ATTITUDE_TEMPLATES.keys())
 
 
 def _sample_critic_message(config):
-    ""
+    """Sample the next critic prompt according to the configured prompt mode."""
     if getattr(config, "critic_prompt_mode", "mixed") == "eval_fixed":
         return "eval_fixed", config.critic_prompt_text
     attitude = random.choice(_ATTITUDES)
     critic_msg = random.choice(ATTITUDE_TEMPLATES[attitude])
     return attitude, critic_msg
-
-
-
-
-
-
-
-
-
-
+# ---------------------------------------------------------------------------
+# vLLM fused-parameter mapping rules
+# ---------------------------------------------------------------------------
 _FUSION_RULES = [
     (["self_attn.q_proj.weight", "self_attn.k_proj.weight", "self_attn.v_proj.weight"],
      "self_attn.qkv_proj.weight"),
@@ -77,14 +73,11 @@ _FUSION_RULES = [
     (["mlp.gate_proj.weight", "mlp.up_proj.weight"],
      "mlp.gate_up_proj.weight"),
 ]
-
-
-
-
-
-
+# ---------------------------------------------------------------------------
+# Rollout helpers
+# ---------------------------------------------------------------------------
 def _tokenize_messages(tokenizer, messages: List[Dict]) -> List[int]:
-    ""
+    """Tokenize a chat message list into prompt token IDs."""
     ids = tokenizer.apply_chat_template(
         messages, tokenize=True, add_generation_prompt=True, return_tensors=None,
     )
@@ -94,7 +87,7 @@ def _tokenize_messages(tokenizer, messages: List[Dict]) -> List[int]:
 
 
 def _detect_generation_prefix(tokenizer, system_prompt: str = "") -> str:
-    ""
+    """Detect whether the generation prompt contains an extra suffix such as '<think>\\n'."""
     msgs = []
     if system_prompt:
         msgs.append({"role": "system", "content": system_prompt})
@@ -134,7 +127,10 @@ def run_rollout(
     world_size: int = 1,
     step_label: str = "",
 ) -> List[Dict]:
-    ""
+    """
+    Run truly asynchronous multi-turn rollout where each sample advances independently.
+    Fast samples do not wait for slow ones.
+    """
     from vllm import SamplingParams
 
 
@@ -190,7 +186,7 @@ def run_rollout(
     stop_flag = False
 
     def _submit(sample_idx: int):
-        ""
+        """Submit one sample's current dialogue state to vLLM as a new request."""
         nonlocal req_counter
         state = states[sample_idx]
         ids = _tokenize_messages(tokenizer, state["messages"])
@@ -239,6 +235,7 @@ def run_rollout(
             state = states[idx]
 
 
+            # One request finished: record the generated turn.
             seq = output.outputs[0]
 
             resp_text = _gen_prefix + seq.text if _gen_prefix else seq.text
@@ -261,17 +258,20 @@ def run_rollout(
 
 
 
+            # Reached the target number of turns.
             if n_done >= num_turns:
                 state["done"] = True
                 continue
 
-
+            # If early stop is already active, do not submit a new request once
+            # the sample has crossed the minimum-turn floor.
             if stop_flag and n_done >= min_turns_for_early_stop:
                 state["done"] = True
                 logger.debug(f"[Rollout] batch={idx_in_batch} gen={idx_in_group}: stopped early (flag set)")
                 continue
 
-
+            # Trigger early stop once enough samples have completed the full
+            # number of turns and all samples have crossed the minimum floor.
             if not stop_flag and n_done >= min_turns_for_early_stop:
                 n_at_max = sum(
                     1 for st in states if len(st["responses"]) >= num_turns
@@ -290,7 +290,7 @@ def run_rollout(
                     state["done"] = True
                     continue
 
-
+            # Inject the critic prompt and immediately submit the next turn.
             attitude, critic_msg = _sample_critic_message(config)
             state["attitudes"].append(attitude)
             state["critic_messages"].append(critic_msg)
@@ -328,8 +328,9 @@ def run_rollout(
             + ", ".join(f"{t} turns={c}" for t, c in sorted(real_turn_counts.items()))
         )
 
-
-
+        # Two-turn early stop may leave some samples with only one realized turn.
+        # Materialize a synthetic keep turn so the downstream reward and batch
+        # builders can keep using the standard two-turn assumptions.
         for state in states:
             if len(state["responses"]) != 1:
                 continue
@@ -385,7 +386,7 @@ def run_rollout(
 
 
 def _get_stop_token_ids(tokenizer) -> List[int]:
-    ""
+    """Return the stop-token IDs used to terminate chat generation."""
     stop_ids = []
     for tok in ["<|im_end|>", "<|endoftext|>"]:
         tid = tokenizer.convert_tokens_to_ids(tok)
@@ -404,7 +405,7 @@ def _find_bridge(
     prev_prompt_ids: List[int],
     im_end_id: int,
 ) -> List[int]:
-    ""
+    """Extract the bridge token IDs between two turns from next_prompt_ids."""
     n_skip = sum(1 for t in prev_prompt_ids if t == im_end_id) + 1
     count = 0
     for i, tok in enumerate(next_prompt_ids):
@@ -422,7 +423,7 @@ def build_training_batch(
     max_seq_length: int,
     turn_loss_weights: Optional[List[float]] = None,
 ) -> tuple:
-    ""
+    """Convert rollout results into a PyTorch training batch."""
     im_end_id = tokenizer.convert_tokens_to_ids("<|im_end|>")
     if im_end_id is None or im_end_id == tokenizer.unk_token_id:
         raise RuntimeError(
@@ -521,14 +522,11 @@ def build_training_batch(
         "advantages":           torch.tensor(batch["advantages"],           dtype=torch.float32),
         "attention_mask":       torch.tensor(batch["attention_mask"],       dtype=torch.long),
     }, kept_indices
-
-
-
-
-
-
+# ---------------------------------------------------------------------------
+# vLLM lifecycle and weight synchronization
+# ---------------------------------------------------------------------------
 def vllm_sleep(llm, level: int = 1) -> None:
-    ""
+    """Put the vLLM engine into sleep mode and release GPU memory for training."""
     llm.sleep(level=level)
     gc.collect()
     torch.cuda.empty_cache()
@@ -536,7 +534,7 @@ def vllm_sleep(llm, level: int = 1) -> None:
 
 
 def vllm_wake_and_sync(llm, training_model: nn.Module, sync_weights: bool = True) -> None:
-    ""
+    """Wake up vLLM and optionally synchronize the latest training-model weights."""
     llm.wake_up()
     torch.cuda.synchronize()
     if sync_weights:
@@ -548,7 +546,7 @@ def vllm_wake_and_sync(llm, training_model: nn.Module, sync_weights: bool = True
 
 
 def _detect_vllm_prefix(llm) -> str:
-    ""
+    """Detect the vLLM parameter-name prefix used by the loaded model."""
     def _has_language_model_prefix(vllm_model):
         for name, _ in vllm_model.named_parameters():
             if name.startswith("language_model."):
@@ -562,14 +560,16 @@ def _detect_vllm_prefix(llm) -> str:
 
 
 def _copy_weights(training_model: nn.Module, llm) -> None:
-    ""
+    """
+    Copy training-model weights into vLLM through CUDA IPC handles and apply_model().
+    """
     src = training_model.module if hasattr(training_model, "module") else training_model
 
-
+    # Detect the naming prefix used by vLLM, e.g. "language_model.".
     vllm_prefix = _detect_vllm_prefix(llm)
     logger.info(f"[vLLM] Detected parameter prefix: {vllm_prefix!r}")
 
-
+    # Build CUDA IPC handles for all trainable parameters.
     ipc_data: Dict = {}
     for name, param in src.named_parameters():
         vllm_name = vllm_prefix + name
@@ -592,13 +592,13 @@ def _copy_weights(training_model: nn.Module, llm) -> None:
             return flat.as_strided(shape, stride, offset)
 
         for name, vp in vllm_model.named_parameters():
-
+            # Direct one-to-one parameter copy.
             if name in ipc_data:
                 vp.data.copy_(_ipc_to_tensor(name))
                 n_direct += 1
                 continue
 
-
+            # Handle vLLM fused parameters such as qkv_proj and gate_up_proj.
             matched = False
             for unfused_suffixes, fused_suffix in _FUSION_RULES:
                 if not name.endswith(fused_suffix):
@@ -633,7 +633,7 @@ def _copy_weights(training_model: nn.Module, llm) -> None:
 
 
 def verify_vllm_weights(llm, training_model: nn.Module) -> None:
-    ""
+    """Debug-only checksum verification between training-model and vLLM weights."""
     src = training_model.module if hasattr(training_model, "module") else training_model
 
 

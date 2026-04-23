@@ -1,4 +1,16 @@
-""
+"""
+Compare asynchronous multi-turn rollout based on engine.step() against
+synchronous multi-turn rollout based on llm.generate().
+
+Experiment design:
+  - 2 prompts: SHORT (math) and LONG (essay generation)
+  - 2 dialogue turns (turn 0 + critic + turn 1)
+  - compare the completion timestamp of every sample at every turn
+
+Expected result:
+  - synchronous: SHORT and LONG finish turn 0 at the same time
+  - asynchronous: SHORT finishes much earlier and does not wait for LONG
+"""
 
 import argparse
 import time
@@ -9,6 +21,7 @@ os.environ.setdefault("VLLM_ALLOW_INSECURE_SERIALIZATION", "1")
 
 
 def run_sync(llm, tokenizer, prompts, sampling_params, num_turns=2):
+    """Synchronous baseline: llm.generate() is called once per turn for the full batch."""
     from copy import deepcopy
 
     N = len(prompts)
@@ -47,6 +60,7 @@ def run_sync(llm, tokenizer, prompts, sampling_params, num_turns=2):
 
 
 def run_async(llm, tokenizer, prompts, sampling_params, num_turns=2):
+    """Asynchronous mode: add_request() + step() advances each sample independently."""
     engine = llm.llm_engine
     N = len(prompts)
 

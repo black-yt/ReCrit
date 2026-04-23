@@ -1,16 +1,39 @@
-""
+"""
+Main entry point for ReCrit training.
+
+Usage (normally launched through run.sh, which auto-detects single-GPU vs.
+multi-GPU mode from CUDA_VISIBLE_DEVICES):
+    # Single GPU
+    CUDA_VISIBLE_DEVICES=0 RANK=0 LOCAL_RANK=0 WORLD_SIZE=1 python -m train \
+        --model_path /path/to/model --train_dataset data.jsonl
+
+    # Multi GPU (run.sh launches one process per GPU)
+    # Each process only sees one GPU, so LOCAL_RANK always stays 0.
+    MASTER_ADDR=127.0.0.1 MASTER_PORT=29500 \
+    CUDA_VISIBLE_DEVICES=0 RANK=0 LOCAL_RANK=0 WORLD_SIZE=2 python -m train ... &
+    CUDA_VISIBLE_DEVICES=1 RANK=1 LOCAL_RANK=0 WORLD_SIZE=2 python -m train ... &
+
+Architecture (distributed rollout + DDP training):
+    Each GPU independently runs the full pipeline, and DDP only communicates
+    during gradient synchronization:
+        1. vLLM wake_up + sync weights  -> rollout
+        2. vLLM sleep                   -> release GPU memory
+        3. compute rewards              -> Judge API per rank
+        4. compute advantages           -> GRPO group normalization per rank
+        5. build training batch         -> per rank
+        6. train_step                   -> micro-batch accumulation + DDP all-reduce
+"""
 
 import os
 
-
+# Fixed environment defaults. Users do not need to set them in launch scripts.
 os.environ.setdefault("VLLM_ALLOW_INSECURE_SERIALIZATION", "1")
 os.environ.setdefault("VLLM_HOST_IP", "127.0.0.1")
 os.environ.setdefault("NCCL_IB_DISABLE", "1")
 os.environ.setdefault("NCCL_NET_GDR_DISABLE", "1")
 os.environ.setdefault("NCCL_COLLNET_ENABLE", "0")
-
-
-
+# Note: expandable_segments is enabled later via
+# torch._C._accelerator_setAllocatorSettings() after vLLM initialization.
 import dataclasses
 import gc
 import hashlib
@@ -43,36 +66,30 @@ logging.basicConfig(
     level=logging.INFO,
 )
 logger = logging.getLogger(__name__)
-
-
-
-
-
-
+# ---------------------------------------------------------------------------
+# Main training loop
+# ---------------------------------------------------------------------------
 def train(config):
-
-
-
-
-
-
-
+    # vLLM must be created before any other CUDA initialization.
+    # Remove distributed env vars temporarily so they are not inherited by
+    # vLLM EngineCore worker processes and accidentally reused for NCCL init.
+    # run.sh already pins each rank to a single visible GPU.
     _DIST_VARS = ("RANK", "LOCAL_RANK", "WORLD_SIZE", "MASTER_ADDR", "MASTER_PORT")
     _dist_backup = {k: os.environ.pop(k) for k in _DIST_VARS if k in os.environ}
     os.environ.setdefault("VLLM_HOST_IP", "127.0.0.1")
 
     llm = load_vllm_engine(config)
 
-
-
-
+    # CUDA allocator is already initialized during vLLM startup, so setting
+    # the env var now is too late. Use the programmatic API instead to reduce
+    # fragmentation during subsequent training allocations.
     torch._C._accelerator_setAllocatorSettings("expandable_segments:True")
 
     os.environ.update(_dist_backup)
 
     rank, local_rank, world_size = setup_ddp()
 
-
+    # Sanity-check the configured vLLM context length.
     _PROMPT_OVERHEAD = 2048
     _BRIDGE_OVERHEAD = 200
     _worst_case = (
@@ -95,7 +112,7 @@ def train(config):
             f"({ _worst_case / config.vllm_max_model_len:.0%} of the limit)."
         )
 
-
+    # Create a versioned run directory on rank 0 and broadcast it.
     Path(config.output_dir).mkdir(parents=True, exist_ok=True)
     if is_main_process():
         run_dir = make_run_dir(config.output_dir)
@@ -107,7 +124,7 @@ def train(config):
     setup_file_logging(os.path.join(run_dir, "train.log"))
     logger.info(f"[Train] Run directory: {run_dir}")
 
-
+    # Save the resolved training arguments for reproducibility.
     if is_main_process():
         args_record = dataclasses.asdict(config)
         args_record["world_size"] = world_size
@@ -117,11 +134,11 @@ def train(config):
             json.dump(args_record, f, indent=2, ensure_ascii=False)
         logger.info(f"[Train] Args saved to {args_path}")
 
-
+    # Seed each rank independently while keeping the run reproducible.
     random.seed(config.seed + rank)
     torch.manual_seed(config.seed + rank)
 
-
+    # Tokenizer and dataset.
     tokenizer = AutoTokenizer.from_pretrained(config.model_path, trust_remote_code=True)
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
