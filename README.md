@@ -2,7 +2,7 @@
 
 # ReCrit
 
-### Inter-Turn Transition-Aware Reinforcement Learning for Scientific Critic Reasoning
+### Transition-Aware Reinforcement Learning for Scientific Critic Reasoning
 
 [![Python](https://img.shields.io/badge/Python-3.10%2B-blue.svg)](https://www.python.org/)
 [![PyTorch](https://img.shields.io/badge/PyTorch-2.x-ee4c2c.svg)](https://pytorch.org/)
@@ -177,7 +177,7 @@ If you find ReCrit useful, please cite the corresponding paper:
 
 ```bibtex
 @misc{recrit2026,
-  title        = {ReCrit: Inter-Turn Transition-Aware Reinforcement Learning for Scientific Critic Reasoning},
+  title        = {ReCrit: Transition-Aware Reinforcement Learning for Scientific Critic Reasoning},
   author       = {Anonymous Authors},
   year         = {2026},
   note         = {Anonymous submission}
