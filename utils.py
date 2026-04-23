@@ -1,8 +1,7 @@
 """
-Utility helpers for ReCrit.
+ReCrit utility helpers.
 
-Includes logging, run-directory management, distributed initialization, model
-loading, optimizer/scheduler creation, checkpointing, and metric logging.
+Includes logging, directory management, distributed initialization, model loading, optimizers, checkpoints, and metric logging.
 """
 
 import os
@@ -19,20 +18,26 @@ from torch.nn.parallel import DistributedDataParallel as DDP
 from transformers import AutoModelForCausalLM, get_cosine_schedule_with_warmup
 
 logger = logging.getLogger(__name__)
+
+
 # ---------------------------------------------------------------------------
 # Logging
 # ---------------------------------------------------------------------------
+
 def setup_file_logging(log_path: str):
-    """Mirror all logger output into a file while keeping terminal logging."""
+    """Write every logger output stream to a file while keeping terminal output enabled."""
     fh = logging.FileHandler(log_path, mode="a", encoding="utf-8")
     fh.setLevel(logging.DEBUG)
     fh.setFormatter(logging.Formatter("[%(asctime)s][%(levelname)s][%(name)s] %(message)s"))
     logging.getLogger().addHandler(fh)
+
+
 # ---------------------------------------------------------------------------
-# Run directory management
+# Directory management
 # ---------------------------------------------------------------------------
+
 def make_run_dir(base_dir: str) -> str:
-    """Create a versioned run directory under base_dir: vXXX_YYYYMMDD_HHMMSS."""
+    """Create a versioned run directory under base_dir with the format vXXX_YYYYMMDD_HHMMSS."""
     base = Path(base_dir)
     base.mkdir(parents=True, exist_ok=True)
     existing = [d.name for d in base.iterdir()
@@ -42,16 +47,19 @@ def make_run_dir(base_dir: str) -> str:
     run_dir = base / f"v{max_ver + 1:03d}_{ts}"
     run_dir.mkdir(parents=True, exist_ok=True)
     return str(run_dir)
+
+
 # ---------------------------------------------------------------------------
-# Distributed helpers
+# Distributed utilities
 # ---------------------------------------------------------------------------
+
 def setup_ddp():
-    """Initialize torch.distributed using the standard RANK/WORLD_SIZE env vars."""
+    """Initialize torch.distributed (torchrun sets RANK and related environment variables automatically)."""
     rank = int(os.environ.get("RANK", 0))
     local_rank = int(os.environ.get("LOCAL_RANK", 0))
     world_size = int(os.environ.get("WORLD_SIZE", 1))
 
-    torch.cuda.set_device(local_rank)  # Bind .cuda() calls to the current rank's device.
+    torch.cuda.set_device(local_rank)  # Ensure that .cuda() binds to the correct device in both single-GPU and multi-GPU settings
 
     if world_size > 1:
         dist.init_process_group(backend="nccl")
@@ -67,7 +75,7 @@ def is_main_process() -> bool:
 
 
 def broadcast_string(s: str) -> str:
-    """Broadcast a UTF-8 string from rank 0 to all processes."""
+    """Broadcast a string from rank 0 to all processes."""
     if not dist.is_available() or not dist.is_initialized() or dist.get_world_size() == 1:
         return s
     if is_main_process():
@@ -84,18 +92,21 @@ def broadcast_string(s: str) -> str:
     if not is_main_process():
         s = bytes(tensor.cpu().numpy().tobytes()).decode("utf-8")
     return s
+
+
 # ---------------------------------------------------------------------------
-# Model and vLLM initialization
+# Model + vLLM initialization
 # ---------------------------------------------------------------------------
+
 def load_training_model(config, local_rank: int, world_size: int) -> torch.nn.Module:
-    """Load the trainable model and wrap it in DDP when world_size > 1."""
+    """Load the training model and wrap it with DDP when using multiple GPUs."""
     logger.info(f"[Model] Loading {config.model_path} ...")
 
     dtype = torch.bfloat16 if config.bf16 else torch.float32
     model = AutoModelForCausalLM.from_pretrained(
         config.model_path,
         dtype=dtype,
-        device_map=None,
+        device_map=None,          # Disable device_map and control placement manually
         trust_remote_code=True,
     )
     model = model.cuda(local_rank)
@@ -112,14 +123,13 @@ def load_training_model(config, local_rank: int, world_size: int) -> torch.nn.Mo
 
 
 def load_reference_model(config, local_rank: int) -> torch.nn.Module:
-    """
-    Load the frozen reference model used for KL regularization.
+    """Load the frozen reference model used for the KL penalty.
 
-    It shares the same checkpoint as the training model, but:
-      - is never wrapped in DDP,
-      - does not enable gradient checkpointing,
-      - has requires_grad=False on every parameter,
-      - is moved between GPU and CPU across rollout/training phases.
+    It uses the same checkpoint as the training model, but:
+    - it is not wrapped with DDP (it does not participate in gradient synchronization)
+    - gradient_checkpointing is disabled (it is unnecessary under no_grad)
+    - every parameter is set to requires_grad=False
+    - it is initially loaded onto the GPU and moved to the CPU during rollout to free GPU memory
     """
     logger.info(f"[RefModel] Loading frozen reference model from {config.model_path} ...")
 
@@ -140,12 +150,10 @@ def load_reference_model(config, local_rank: int) -> torch.nn.Module:
 
 
 def load_vllm_engine(config):
-    """
-    Initialize the vLLM engine in sleep mode and wake it later for rollout.
+    """Initialize the vLLM LLM instance in sleep mode and wake it later when needed.
 
-    In multi-GPU mode each rank calls this independently. Because run.sh
-    restricts CUDA_VISIBLE_DEVICES to one GPU per process, each vLLM engine
-    automatically binds to the correct physical device.
+    In multi-GPU mode, every rank calls this function independently. Because run.sh restricts CUDA_VISIBLE_DEVICES to
+    a single GPU, each rank's vLLM engine automatically binds to its corresponding physical GPU.
     """
     from vllm import LLM
     from rollout import vllm_sleep
@@ -161,13 +169,17 @@ def load_vllm_engine(config):
         enable_sleep_mode=True,
         trust_remote_code=True,
     )
-    # Immediately release vLLM GPU memory until the first rollout call.
+
+    # Put the engine to sleep immediately after initialization so the training model can use the GPU
     vllm_sleep(llm, level=1)
     logger.info("[vLLM] Engine initialized and sleeping.")
     return llm
+
+
 # ---------------------------------------------------------------------------
-# Optimizer and scheduler
+# Optimizer + scheduler
 # ---------------------------------------------------------------------------
+
 def build_optimizer_scheduler(model, config, total_steps: int):
     no_decay = {"bias", "LayerNorm.weight", "layer_norm.weight", "layernorm.weight", "norm.weight"}
     param_groups = [
@@ -188,16 +200,19 @@ def build_optimizer_scheduler(model, config, total_steps: int):
         num_training_steps=total_steps,
     )
     return optimizer, scheduler
-# ---------------------------------------------------------------------------
-# Checkpointing
-# ---------------------------------------------------------------------------
-def save_checkpoint(model, tokenizer, optimizer, scheduler, epoch, step, config):
-    """
-    Save a checkpoint in an ms-swift-compatible format.
 
-    The saved checkpoint keeps the multimodal base-model structure by combining
-    trainable LLM weights with the untouched visual encoder weights from the base
-    checkpoint and then shards the result into safetensors files.
+
+# ---------------------------------------------------------------------------
+# Checkpoint
+# ---------------------------------------------------------------------------
+
+def save_checkpoint(model, tokenizer, optimizer, scheduler, epoch, step, config):
+    """Save a checkpoint in the ms-swift-compatible format.
+
+    Keep it consistent with the ms-swift SFT checkpoint format:
+    - merge the LLM training weights with the base-model visual-encoder weights
+    - save shards as safetensors (max 5 GB each)
+    - copy the full multimodal config and processor settings
     """
     if not is_main_process():
         return
@@ -208,15 +223,15 @@ def save_checkpoint(model, tokenizer, optimizer, scheduler, epoch, step, config)
     from safetensors import safe_open
     from safetensors.torch import save_file
     from huggingface_hub import split_torch_state_dict_into_shards
-    # Keep only the newest save_total_limit - 1 checkpoint directories before
-    # writing the next one.
+
+    # Delete old checkpoints first so space is released before writing the new checkpoint
     if config.save_total_limit > 0:
         ckpt_dirs = sorted(
             [d for d in Path(config.output_dir).iterdir()
              if d.is_dir() and d.name.startswith("checkpoint-")],
             key=lambda d: d.stat().st_mtime,
         )
-
+        # Keep save_total_limit - 1 checkpoints so there is room for the next one
         n_to_keep = config.save_total_limit - 1
         if len(ckpt_dirs) > n_to_keep:
             for old_dir in ckpt_dirs[:len(ckpt_dirs) - n_to_keep]:
@@ -225,12 +240,14 @@ def save_checkpoint(model, tokenizer, optimizer, scheduler, epoch, step, config)
 
     out = Path(config.output_dir) / f"checkpoint-epoch{epoch}-step{step}"
     out.mkdir(parents=True, exist_ok=True)
-    # Extract the training model state dict.
+
+    # Unwrap DDP
     raw = model.module if hasattr(model, "module") else model
 
-
-
-    # If the base checkpoint is sharded, keep only keys belonging to the base model.
+    # ── Build The Full state_dict (LLM + Visual Encoder) ──────────────────────
+    # When AutoModelForCausalLM loads Qwen3_5ForConditionalGeneration,
+    # state_dict() returns two copies of the tied weights (model.layers.* and
+    # model.language_model.layers.*). These must be filtered so that only keys present in the base model are kept.
     base_path = Path(config.model_path)
     base_index_path = base_path / "model.safetensors.index.json"
 
@@ -239,16 +256,17 @@ def save_checkpoint(model, tokenizer, optimizer, scheduler, epoch, step, config)
             base_index = json.load(f)
         base_keys = set(base_index["weight_map"].keys())
     else:
-        base_keys = None
+        base_keys = None  # Skip filtering when no index file is present
 
-
+    # Extract LLM weights and filter out tied-weight aliases
     full_sd = raw.state_dict()
     if base_keys is not None:
         state_dict = {k: v.cpu() for k, v in full_sd.items() if k in base_keys}
     else:
         state_dict = {k: v.cpu() for k, v in full_sd.items()}
     n_llm = len(state_dict)
-    # Load the untouched visual encoder weights from the base checkpoint.
+
+    # Load missing weights such as the visual encoder from the base model
     if base_index_path.exists():
         visual_shards = set()
         for key, shard_file in base_index["weight_map"].items():
@@ -271,7 +289,7 @@ def save_checkpoint(model, tokenizer, optimizer, scheduler, epoch, step, config)
     n_visual = len(state_dict) - n_llm
     logger.info(f"[Checkpoint] state_dict: {n_llm} LLM + {n_visual} visual = {len(state_dict)} total")
 
-
+    # ── Save Sharded safetensors ──────────────────────────────────────
     plan = split_torch_state_dict_into_shards(
         state_dict, max_shard_size="5GB",
     )
@@ -279,9 +297,9 @@ def save_checkpoint(model, tokenizer, optimizer, scheduler, epoch, step, config)
         shard = {k: state_dict[k] for k in tensors}
         save_file(shard, str(out / filename))
 
-
+    # Write index.json
     if not plan.is_sharded:
-
+        # Single-file checkpoint: no index is required
         pass
     else:
         index = {
@@ -291,7 +309,7 @@ def save_checkpoint(model, tokenizer, optimizer, scheduler, epoch, step, config)
         with open(str(out / "model.safetensors.index.json"), "w") as f:
             json.dump(index, f, indent=2, ensure_ascii=False)
 
-
+    # ── Copy Configuration Files (Using The Full Multimodal Base Configuration) ──────────────────────
     for cfg_file in [
         "config.json", "generation_config.json",
         "preprocessor_config.json", "processor_config.json",
@@ -302,7 +320,7 @@ def save_checkpoint(model, tokenizer, optimizer, scheduler, epoch, step, config)
 
     tokenizer.save_pretrained(str(out))
 
-
+    # Training-state metadata
     trainer_state = {"epoch": epoch, "opt_step": step}
     if config.save_optimizer:
         trainer_state["optimizer"] = optimizer.state_dict()
@@ -312,9 +330,9 @@ def save_checkpoint(model, tokenizer, optimizer, scheduler, epoch, step, config)
     logger.info(f"[Checkpoint] Saved to {out} ({len(plan.filename_to_tensors)} shards, {len(state_dict)} params)")
 
 
-
-
-
+# ---------------------------------------------------------------------------
+# TensorBoard logging
+# ---------------------------------------------------------------------------
 
 _writer = None
 
@@ -331,7 +349,7 @@ def get_writer(log_dir: str):
 
 
 def fmt_duration(seconds: float) -> str:
-    """Format seconds into a readable duration such as '2h 05m' or '1d 3h 12m'."""
+    """Format a duration in seconds as a readable string such as '2h 05m' or '1d 3h 12m'."""
     d, rem = divmod(int(seconds), 86400)
     h, rem = divmod(rem, 3600)
     m = rem // 60
@@ -348,13 +366,13 @@ def log_metrics(metrics: Dict, step: int, config):
         for k, v in metrics.items():
             if isinstance(v, (int, float)):
                 w.add_scalar(k, v, step)
-
+    # Write to both the terminal and the log file
     parts = "  ".join(
         f"{k}={v:.4f}" if isinstance(v, float) else f"{k}={v}"
         for k, v in metrics.items()
     )
     logger.info(f"[Metrics step={step}] {parts}")
-
+    # Write to JSONL
     record = {"timestamp": datetime.datetime.now().isoformat(timespec="seconds")}
     record.update(metrics)
     jsonl_path = os.path.join(config.output_dir, "metrics.jsonl")

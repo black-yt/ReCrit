@@ -1,8 +1,12 @@
 """
-Test how vLLM reports logprobs for stop tokens.
+Test how vLLM returns logprobs when stop_token_ids is set.
 
-Specifically checks whether, with stop_token_ids=[im_end_id], vLLM includes the
-stop token in both seq.token_ids and seq.logprobs.
+Verify that when stop_token_ids=[im_end_id],
+vLLM includes the stop token in seq.token_ids and seq.logprobs.
+
+Usage:
+    conda run -n llm python tests/test_stop_token_logprob.py \
+        --model_path /path/to/model
 """
 
 import argparse
@@ -20,6 +24,7 @@ def main():
 
     tokenizer = AutoTokenizer.from_pretrained(args.model_path, trust_remote_code=True)
 
+    # Find the stop-token IDs
     im_end_id = tokenizer.convert_tokens_to_ids("<|im_end|>")
     eos_id = tokenizer.eos_token_id
     stop_ids = []
@@ -52,6 +57,7 @@ def main():
     prompt_ids = tokenizer.apply_chat_template(
         msgs, tokenize=True, add_generation_prompt=True, return_tensors=None,
     )
+    # apply_chat_template may return a dict or values that are not Python ints
     if not isinstance(prompt_ids, list):
         prompt_ids = prompt_ids["input_ids"]
     prompt_ids = [int(x) for x in prompt_ids]
@@ -63,6 +69,7 @@ def main():
         stop_token_ids=stop_ids,
     )
 
+    # Use the low-level engine API (consistent with rollout.py)
     engine = llm.llm_engine
     engine.add_request(
         request_id="test_0",
@@ -90,6 +97,7 @@ def main():
     print(f"Last 5 tokens decoded: {[tokenizer.decode([t]) for t in token_ids[-5:]]}")
     print(f"logprobs length: {len(logprobs) if logprobs else 'None'}")
 
+    # Core check
     has_stop_in_ids = any(t in stop_ids for t in token_ids[-3:])
     last_is_im_end = token_ids[-1] == im_end_id if token_ids else False
 
@@ -99,6 +107,7 @@ def main():
 
     if logprobs and len(logprobs) == len(token_ids):
         print(f"logprobs length == token_ids length: True (both are {len(token_ids)})")
+        # Check the logprob of the final token
         last_lp = logprobs[-1]
         if last_lp and token_ids[-1] in last_lp:
             lp_val = last_lp[token_ids[-1]].logprob
@@ -127,6 +136,7 @@ def main():
         print("logprobs is None or empty")
         print("\nConclusion: vLLM did not return logprobs; check the SamplingParams configuration.")
 
+    # Print the last few tokens one by one
     print(f"\n--- Detailed logprobs for the last 5 tokens ---")
     start = max(0, len(token_ids) - 5)
     for i in range(start, len(token_ids)):

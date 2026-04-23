@@ -1,18 +1,30 @@
 """
-Validate _find_bridge() by extracting the bridge token IDs between two turns.
+Verify the correctness of _find_bridge(): extract the bridge token IDs between two turns from next_prompt_ids.
+
+Test logic:
+    1. use the tokenizer to compute turn1_prompt_ids and turn2_prompt_ids
+    2. use _find_bridge to extract bridge_ids from turn2_prompt_ids
+    3. verify that the bridge contains the critic message and excludes the turn-1 content
+
+Prerequisites:
+    Requires transformers and a model tokenizer that supports chat templates.
+
+Usage:
+    conda run -n llm python -m tests.test_bridge_alignment --model_path /path/to/model
 """
 
 import argparse
 import sys
 import os
 
+# Add the recrit root directory to sys.path so rollout and related modules can be imported
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 from rollout import _find_bridge
 
 
 def test_bridge_alignment(model_path: str) -> bool:
-    """Check bridge extraction across multiple turn-1 / critic-message combinations."""
+    """Verify that _find_bridge extracts correctly across multiple turn1/critic combinations."""
     from transformers import AutoTokenizer
 
     print(f"Loading tokenizer from {model_path} ...")
@@ -60,6 +72,7 @@ def test_bridge_alignment(model_path: str) -> bool:
             bridge_ids = _find_bridge(turn2_prompt_ids, turn1_prompt_ids, im_end_id)
             bridge_text = tokenizer.decode(bridge_ids)
 
+            # Checks
             critic_in_bridge = critic_msg in bridge_text
             bridge_starts_with_newline = bridge_text.startswith("\n")
             bridge_ends_with_gen_prompt = (

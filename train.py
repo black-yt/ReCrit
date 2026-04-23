@@ -1,39 +1,41 @@
 """
-Main entry point for ReCrit training.
+ReCrit main training entry.
 
-Usage (normally launched through run.sh, which auto-detects single-GPU vs.
-multi-GPU mode from CUDA_VISIBLE_DEVICES):
+Usage (launched through run.sh, which automatically selects single-GPU or multi-GPU mode based on CUDA_VISIBLE_DEVICES):
     # Single GPU
-    CUDA_VISIBLE_DEVICES=0 RANK=0 LOCAL_RANK=0 WORLD_SIZE=1 python -m train \
+    CUDA_VISIBLE_DEVICES=0 RANK=0 LOCAL_RANK=0 WORLD_SIZE=1 python -m train \\
         --model_path /path/to/model --train_dataset data.jsonl
 
-    # Multi GPU (run.sh launches one process per GPU)
-    # Each process only sees one GPU, so LOCAL_RANK always stays 0.
-    MASTER_ADDR=127.0.0.1 MASTER_PORT=29500 \
+    # Multi GPU (one process per GPU, launched automatically by run.sh)
+    # run.sh restricts CUDA_VISIBLE_DEVICES to a single GPU for each rank,
+    # so each process sees only one GPU and LOCAL_RANK always stays 0.
+    MASTER_ADDR=127.0.0.1 MASTER_PORT=29500 \\
     CUDA_VISIBLE_DEVICES=0 RANK=0 LOCAL_RANK=0 WORLD_SIZE=2 python -m train ... &
     CUDA_VISIBLE_DEVICES=1 RANK=1 LOCAL_RANK=0 WORLD_SIZE=2 python -m train ... &
 
 Architecture (distributed rollout + DDP training):
-    Each GPU independently runs the full pipeline, and DDP only communicates
-    during gradient synchronization:
-        1. vLLM wake_up + sync weights  -> rollout
-        2. vLLM sleep                   -> release GPU memory
-        3. compute rewards              -> Judge API per rank
-        4. compute advantages           -> GRPO group normalization per rank
-        5. build training batch         -> per rank
-        6. train_step                   -> micro-batch accumulation + DDP all-reduce
+    Each GPU runs the full pipeline independently; DDP communicates only during gradient synchronization:
+    for each epoch:
+        for each batch of prompts (sharded by DistributedSampler):
+            1. vLLM wake_up + sync weights  →  rollout (independent on each GPU)
+            2. vLLM sleep                   →  free GPU memory
+            3. compute rewards (four quadrants) (each GPU calls the Judge API independently)
+            4. compute advantages (GRPO group normalization) (each GPU owns a complete prompt group)
+            5. build training batch (independent on each GPU)
+            6. train_step (micro-batch gradient accumulation + DDP all-reduce)
 """
 
 import os
 
-# Fixed environment defaults. Users do not need to set them in launch scripts.
-os.environ.setdefault("VLLM_ALLOW_INSECURE_SERIALIZATION", "1")
-os.environ.setdefault("VLLM_HOST_IP", "127.0.0.1")
-os.environ.setdefault("NCCL_IB_DISABLE", "1")
-os.environ.setdefault("NCCL_NET_GDR_DISABLE", "1")
-os.environ.setdefault("NCCL_COLLNET_ENABLE", "0")
-# Note: expandable_segments is enabled later via
-# torch._C._accelerator_setAllocatorSettings() after vLLM initialization.
+# Fixed environment variables; users do not need to set them in the launcher.
+os.environ.setdefault("VLLM_ALLOW_INSECURE_SERIALIZATION", "1")  # Required for apply_model weight sync.
+os.environ.setdefault("VLLM_HOST_IP", "127.0.0.1")               # Use loopback in K8s pods to avoid network-policy blocking.
+os.environ.setdefault("NCCL_IB_DISABLE", "1")                    # Disable IB (unavailable inside the container).
+os.environ.setdefault("NCCL_NET_GDR_DISABLE", "1")               # Disable GPU Direct RDMA.
+os.environ.setdefault("NCCL_COLLNET_ENABLE", "0")                 # Disable Sharp/CollNet (it may hang if not available).
+# Note: expandable_segments is enabled dynamically via torch.cuda.memory._set_allocator_settings()
+# after vLLM init. See the call right after load_vllm_engine() inside train().
+
 import dataclasses
 import gc
 import hashlib
@@ -66,30 +68,36 @@ logging.basicConfig(
     level=logging.INFO,
 )
 logger = logging.getLogger(__name__)
+
+
 # ---------------------------------------------------------------------------
 # Main training loop
 # ---------------------------------------------------------------------------
+
 def train(config):
-    # vLLM must be created before any other CUDA initialization.
-    # Remove distributed env vars temporarily so they are not inherited by
-    # vLLM EngineCore worker processes and accidentally reused for NCCL init.
-    # run.sh already pins each rank to a single visible GPU.
+    # ── vLLM must be created before any other CUDA initialization ─────────────
+    # Clear distributed environment variables so they are not inherited by the vLLM EngineCore subprocess and accidentally reused
+    # for NCCL init, which would cause a hang.
+    # run.sh already restricts CUDA_VISIBLE_DEVICES to a single GPU per rank,
+    # so each rank's vLLM binds to its corresponding physical GPU (visible as cuda:0).
+    # In multi-GPU mode, each vLLM EngineCore log still shows rank=0, world_size=1,
+    # which is expected because vLLM's distributed context is independent of DDP training.
     _DIST_VARS = ("RANK", "LOCAL_RANK", "WORLD_SIZE", "MASTER_ADDR", "MASTER_PORT")
     _dist_backup = {k: os.environ.pop(k) for k in _DIST_VARS if k in os.environ}
     os.environ.setdefault("VLLM_HOST_IP", "127.0.0.1")
 
     llm = load_vllm_engine(config)
 
-    # CUDA allocator is already initialized during vLLM startup, so setting
-    # the env var now is too late. Use the programmatic API instead to reduce
-    # fragmentation during subsequent training allocations.
+    # During vLLM init, the CUDA allocator has already been initialized (spawn requires CUDA to be initialized),
+    # so setting an environment variable is already too late. Enable expandable_segments programmatically here,
+    # so later training-model allocations use independently reclaimable memory segments and avoid fragmentation-induced OOM.
     torch._C._accelerator_setAllocatorSettings("expandable_segments:True")
 
-    os.environ.update(_dist_backup)
+    os.environ.update(_dist_backup)   # Restore them for setup_ddp().
 
     rank, local_rank, world_size = setup_ddp()
 
-    # Sanity-check the configured vLLM context length.
+    # ── vLLM context length sanity check ─────────────────────────────────────
     _PROMPT_OVERHEAD = 2048
     _BRIDGE_OVERHEAD = 200
     _worst_case = (
@@ -112,7 +120,7 @@ def train(config):
             f"({ _worst_case / config.vllm_max_model_len:.0%} of the limit)."
         )
 
-    # Create a versioned run directory on rank 0 and broadcast it.
+    # ── Run directory: vXXX_timestamp, created on rank 0 and broadcast ───────
     Path(config.output_dir).mkdir(parents=True, exist_ok=True)
     if is_main_process():
         run_dir = make_run_dir(config.output_dir)
@@ -120,11 +128,11 @@ def train(config):
         run_dir = ""
     run_dir = broadcast_string(run_dir)
     Path(run_dir).mkdir(parents=True, exist_ok=True)
-    config.output_dir = run_dir
+    config.output_dir = run_dir   # All later outputs (log/jsonl/tb/ckpt) go here.
     setup_file_logging(os.path.join(run_dir, "train.log"))
     logger.info(f"[Train] Run directory: {run_dir}")
 
-    # Save the resolved training arguments for reproducibility.
+    # ── Save experiment arguments ─────────────────────────────────────────────
     if is_main_process():
         args_record = dataclasses.asdict(config)
         args_record["world_size"] = world_size
@@ -134,20 +142,20 @@ def train(config):
             json.dump(args_record, f, indent=2, ensure_ascii=False)
         logger.info(f"[Train] Args saved to {args_path}")
 
-    # Seed each rank independently while keeping the run reproducible.
+    # ── Random seeds (different per GPU, for independent rollout attitude sampling) ─
     random.seed(config.seed + rank)
     torch.manual_seed(config.seed + rank)
 
-    # Tokenizer and dataset.
+    # ── Tokenizer ─────────────────────────────────────────────────────────────
     tokenizer = AutoTokenizer.from_pretrained(config.model_path, trust_remote_code=True)
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
 
-
-
-
-
-
+    # ── Dataset + DistributedSampler ──────────────────────────────────────────
+    # Each GPU reads the dataset independently and shards it with DistributedSampler.
+    # At each step, each GPU processes per_device_train_batch_size prompts,
+    # and each prompt produces num_generations rollout samples.
+    # Each GPU holds a complete prompt group (G samples), so GRPO advantages can be computed locally.
     dataset = QADataset(
         config.train_dataset,
         judge_mode=config.judge_mode,
@@ -177,38 +185,38 @@ def train(config):
         )
     steps_per_epoch = len(dataloader)
 
-
+    # ── Training model (vLLM is already asleep and GPU memory is freed) ──────
     model = load_training_model(config, local_rank, world_size)
 
-
+    # ── Reference model (used for KL regularization, frozen during training) ─
     ref_model = None
     if config.kl_beta > 0:
         ref_model = load_reference_model(config, local_rank)
-
+        # Load it onto GPU initially, then move it to CPU before rollout to free memory.
         ref_model.cpu()
         torch.cuda.empty_cache()
 
-
+    # ── Optimizer / scheduler ─────────────────────────────────────────────────
     accum_steps = config.gradient_accumulation_steps
     accum_scale = 1.0 / accum_steps
-
-    last_group_size = steps_per_epoch % accum_steps
+    # The end of an epoch may not fill a complete accumulation group, so scale gradients by the actual number of steps.
+    last_group_size = steps_per_epoch % accum_steps  # 0 means divisible, so there is no incomplete group.
     last_group_accum_scale = 1.0 / last_group_size if last_group_size > 0 else accum_scale
     last_group_start = steps_per_epoch - last_group_size if last_group_size > 0 else steps_per_epoch
     total_data_steps = steps_per_epoch * config.num_train_epochs
-    total_steps = math.ceil(total_data_steps / accum_steps)
+    total_steps = math.ceil(total_data_steps / accum_steps)  # Total number of optimizer steps.
     optimizer, scheduler = build_optimizer_scheduler(model, config, total_steps)
-    optimizer.zero_grad(set_to_none=True)
+    optimizer.zero_grad(set_to_none=True)  # Initial zeroing; later managed uniformly by trainer.py via step+zero_grad.
 
     global_step = 0
-    accum_counter = 0
-    accum_metrics_list = []
-    accum_results_all = []
-    accum_n_samples = 0
-    accum_n_dropped = 0
-    accum_seq_lengths = []
-    accum_total_tokens = 0
-    _accum_start_time = time.monotonic()
+    accum_counter = 0       # Number of train_step calls accumulated in the current group.
+    accum_metrics_list = [] # Metrics from each train_step inside the accumulation window.
+    accum_results_all = []  # All rollout results inside the accumulation window (for aggregated logging).
+    accum_n_samples = 0     # Total number of samples inside the accumulation window.
+    accum_n_dropped = 0     # Number of samples dropped for overlength inside the accumulation window.
+    accum_seq_lengths = []  # Lengths of all training sequences before padding inside the accumulation window.
+    accum_total_tokens = 0  # Total training-token count inside the accumulation window (for throughput logging).
+    _accum_start_time = time.monotonic()  # Start time of the current accumulation group.
     _train_start_time = time.monotonic()
     logger.info(f"[Train] Starting: {config.num_train_epochs} epochs, "
                 f"{steps_per_epoch} steps/epoch, total {total_steps} optimizer steps "
@@ -236,7 +244,7 @@ def train(config):
 
         for batch_idx, batch_prompts in enumerate(dataloader):
 
-
+            # ── Debug: verify data sharding ──────────────────────────────────
             if config.debug:
                 qs = "|".join(p["question"][:50] for p in batch_prompts)
                 h = hashlib.md5(qs.encode()).hexdigest()[:8]
@@ -247,7 +255,7 @@ def train(config):
                     f"first_q={batch_prompts[0]['question'][:60]!r}"
                 )
 
-
+            # ── Rollout (independent on each GPU, with its own vLLM engine) ──
             gc.collect()
             torch.cuda.empty_cache()
 
@@ -264,12 +272,12 @@ def train(config):
             need_sync = (accum_counter == 0)
             vllm_wake_and_sync(llm, raw_model, sync_weights=need_sync)
 
-
+            # ── Debug: verify vLLM weight sync (only after real sync) ────────
             if config.debug and need_sync:
                 try:
                     torch.cuda.empty_cache()
                     verify_vllm_weights(llm, raw_model)
-
+                    # verify_vllm_weights raises RuntimeError on mismatch.
                 except torch.cuda.OutOfMemoryError:
                     logger.warning(
                         "[DEBUG] verify_vllm_weights skipped due to CUDA OOM. "
@@ -287,11 +295,11 @@ def train(config):
 
             vllm_sleep(llm, level=1)
 
-
+            # ── Move the reference model back to GPU (vLLM has freed memory) ─
             if ref_model is not None:
                 ref_model.cuda(local_rank)
 
-
+            # ── Debug: verify rollout sample counts ───────────────────────────
             if config.debug:
                 expected_samples = len(batch_prompts) * config.num_generations
                 logger.info(
@@ -300,7 +308,7 @@ def train(config):
                     f"got {len(results)} samples (expected {expected_samples}), "
                     f"sync_weights={need_sync}"
                 )
-
+                # Print the full rollout of the first sample to debug think_format and related issues.
                 r0 = results[0]
                 for t_idx, resp in enumerate(r0["responses"]):
                     has_think_open  = "<think>" in resp
@@ -313,20 +321,20 @@ def train(config):
                         f"{escaped}"
                     )
 
-
+            # ── Reward computation (each GPU calls the Judge API independently) ─
             results = compute_all_rewards(results, config)
 
-
+            # ── Advantage computation (each GPU owns a complete prompt group) ─
             results = compute_grpo_advantages(results, config.num_generations)
 
-
+            # ── Build training batch (independent on each GPU) ────────────────
             batch, kept_indices = build_training_batch(
                 results,
                 tokenizer,
                 config.max_seq_length,
                 turn_loss_weights=list(config.turn_loss_weights),
             )
-
+            # Hold these statistics temporarily and add them to the accumulation buffer only after the DDP synchronization check passes.
             _batch_n_samples = len(results)
             _batch_n_dropped = 0
             _batch_seq_lengths = []
@@ -359,11 +367,11 @@ def train(config):
                         [r["advantage"] for r in kept_results], dtype=torch.float32
                     )
             else:
-
+                # batch=None means every sample was dropped for overlength.
                 _batch_n_dropped = _batch_n_samples
 
-
-
+            # ── Synchronization check: DDP requires every rank to enter forward/backward together ─
+            # If any rank has an empty batch, skip this step on all ranks without counting it toward accumulation.
             has_batch_t = torch.tensor(
                 [1 if batch is not None else 0], dtype=torch.long,
             ).cuda()
@@ -377,8 +385,8 @@ def train(config):
                 )
                 continue
 
-
-
+            # ── Training step (gradient accumulation) ─────────────────────────
+            # The DDP synchronization check has passed, so add this batch's statistics to the accumulation buffer.
             accum_n_samples += _batch_n_samples
             accum_n_dropped += _batch_n_dropped
             accum_seq_lengths.extend(_batch_seq_lengths)
@@ -386,12 +394,12 @@ def train(config):
 
             accum_counter += 1
             is_last_batch_in_epoch = (batch_idx == steps_per_epoch - 1)
-
-
-
-
+            # is_opt_step: whether optimizer.step() should run. It is True in two cases:
+            #   1. gradient accumulation reaches gradient_accumulation_steps (the normal trigger)
+            #   2. the final batch of the epoch (forced step, to avoid leaving an incomplete accumulation group
+            #      whose gradients have not gone through DDP all-reduce, which would make parameters diverge across GPUs)
             is_opt_step = (accum_counter >= accum_steps) or is_last_batch_in_epoch
-
+            # Every step in an incomplete tail group uses last_group_scale.
             actual_scale = last_group_accum_scale if batch_idx >= last_group_start else accum_scale
 
             gc.collect()
@@ -402,38 +410,38 @@ def train(config):
                 accumulation_scale=actual_scale,
                 ref_model=ref_model,
             )
-            del batch
+            del batch  # Release the batch reference immediately before the next rollout.
 
-
+            # ── Move the reference model back to CPU to free memory for the next rollout's vLLM ─
             if ref_model is not None:
                 ref_model.cpu()
             gc.collect()
             torch.cuda.empty_cache()
 
-
+            # Accumulate metrics and results for aggregated logging.
             accum_metrics_list.append(step_metrics)
             accum_results_all.extend(results)
 
             if not is_opt_step:
                 continue
 
-
+            # ── Everything below runs only after optimizer.step() (is_opt_step=True) ─
             scheduler.step()
             global_step += 1
             accum_counter = 0
 
-
+            # ── Aggregate metrics within the accumulation window ──────────────
             n_accum = len(accum_metrics_list)
             agg_metrics = {
                 k: sum(m[k] for m in accum_metrics_list) / n_accum
                 for k in accum_metrics_list[0]
             }
-
+            # grad_norm is only valid on the final train_step where is_opt_step=True.
             agg_metrics["grad_norm"] = accum_metrics_list[-1]["grad_norm"]
 
-
+            # ── Debug: compare DDP losses and verify parameter synchronization ─
             if config.debug and world_size > 1:
-
+                # Losses should differ across ranks (different data), but parameters should match because of DDP synchronization.
                 loss_t = torch.tensor([agg_metrics["loss"]], dtype=torch.float64).cuda()
                 all_losses = [torch.zeros_like(loss_t) for _ in range(world_size)]
                 dist.all_gather(all_losses, loss_t)
@@ -464,7 +472,7 @@ def train(config):
                     )
                 del param_t, all_params
 
-
+            # ── Logging (rank 0 only, aggregate rollout statistics across all accumulation batches) ─
             if is_main_process() and global_step % config.logging_steps == 0:
                 stats = quadrant_stats(accum_results_all)
                 turn_lens = [len(r["responses"]) for r in accum_results_all]
@@ -476,7 +484,7 @@ def train(config):
                 )
                 accum_elapsed = time.monotonic() - _accum_start_time
                 tokens_per_second = accum_total_tokens / max(accum_elapsed, 1e-3)
-
+                # Put progress and timing fields first in the JSONL record.
                 elapsed = time.monotonic() - _train_start_time
                 eta = elapsed / global_step * (total_steps - global_step) if global_step > 0 else 0.0
                 all_metrics = {
@@ -514,9 +522,9 @@ def train(config):
                     "rollout/min_turns":       float(min_turns),
                 }
                 def _turn_acc_sort_key(key: str):
-
-
-
+                    # Keep per-turn accuracy logs ordered by turn index explicitly,
+                    # instead of relying on dict insertion order.
+                    # acc_turn_1 / acc_turn_3_last -> 1 / 3
                     suffix = key.removeprefix("acc_turn_")
                     turn_str = suffix.split("_", 1)[0]
                     return int(turn_str)
@@ -547,12 +555,12 @@ def train(config):
                     f"seq={mean_seq_length:.0f} tok/s={tokens_per_second:.0f}"
                 )
 
-
+            # ── Step-level checkpoint ─────────────────────────────────────────
             if is_main_process() and config.save_steps > 0 and global_step % config.save_steps == 0:
                 save_checkpoint(model, tokenizer, optimizer, scheduler,
                                 epoch, global_step, config)
 
-
+            # ── Clear accumulation buffers ────────────────────────────────────
             accum_metrics_list.clear()
             accum_results_all.clear()
             accum_n_samples = 0
@@ -561,10 +569,10 @@ def train(config):
             accum_total_tokens = 0
             _accum_start_time = time.monotonic()
 
+        # The final batch of the epoch has already forced a step via is_last_batch_in_epoch,
+        # so there is no need to flush an incomplete accumulation group here.
 
-
-
-
+        # ── End of epoch: save checkpoint ─────────────────────────────────────
         if is_main_process():
             save_checkpoint(model, tokenizer, optimizer, scheduler,
                             epoch + 1, global_step, config)
@@ -579,9 +587,9 @@ def train(config):
         dist.destroy_process_group()
 
 
-
-
-
+# ---------------------------------------------------------------------------
+# Entry point
+# ---------------------------------------------------------------------------
 
 if __name__ == "__main__":
     cfg = parse_args()

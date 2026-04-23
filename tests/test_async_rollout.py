@@ -1,6 +1,5 @@
 """
-Compare asynchronous multi-turn rollout based on engine.step() against
-synchronous multi-turn rollout based on llm.generate().
+Compare asynchronous multi-turn rollout based on engine.step() against synchronous multi-turn rollout based on llm.generate().
 
 Experiment design:
   - 2 prompts: SHORT (math) and LONG (essay generation)
@@ -9,7 +8,13 @@ Experiment design:
 
 Expected result:
   - synchronous: SHORT and LONG finish turn 0 at the same time
-  - asynchronous: SHORT finishes much earlier and does not wait for LONG
+  - asynchronous: SHORT finishes turn 0 much earlier and does not wait for LONG
+
+Prerequisites:
+    Requires vLLM and a GPU.
+
+Usage:
+    conda run -n llm python -m tests.test_async_rollout --model_path /path/to/model
 """
 
 import argparse
@@ -60,7 +65,7 @@ def run_sync(llm, tokenizer, prompts, sampling_params, num_turns=2):
 
 
 def run_async(llm, tokenizer, prompts, sampling_params, num_turns=2):
-    """Asynchronous mode: add_request() + step() advances each sample independently."""
+    """Asynchronous mode: engine.add_request() + engine.step() advances each sample independently."""
     engine = llm.llm_engine
     N = len(prompts)
 
@@ -167,6 +172,7 @@ def main():
 
     SEP = "=" * 70
 
+    # ── Experiment 1: Synchronous Mode ────────────────────────────────────────────────────
     print(f"\n{SEP}")
     print("Experiment 1: synchronous mode (llm.generate)")
     print(SEP)
@@ -183,6 +189,7 @@ def main():
     import gc, torch
     gc.collect(); torch.cuda.empty_cache()
 
+    # ── Experiment 2: Asynchronous Mode ────────────────────────────────────────────────────
     print(f"\n{SEP}")
     print("Experiment 2: asynchronous mode (engine.step)")
     print(SEP)
@@ -198,6 +205,7 @@ def main():
     del llm_async
     gc.collect(); torch.cuda.empty_cache()
 
+    # ── Comparison Results ──────────────────────────────────────────────────────────────
     print(f"\n{SEP}")
     print("Comparison")
     print(SEP)
