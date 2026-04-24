@@ -6,14 +6,14 @@ Implements:
   - grpo_loss():            PPO-clip loss with token-level importance sampling
   - train_step():           one training-step update
 
-Key design choices kept aligned with ms-swift:
+Key design choices:
   - logits_to_keep: compute logprobs only on the completion region and skip the prompt (saves memory)
-  - temperature: logits /= temperature (consistent with ms-swift grpo_trainer.py:1619)
+  - temperature: logits /= temperature
   - on-policy old_logprobs: use per_token_logps.detach() instead of vLLM logprobs
       (mathematically equivalent when num_iterations=1, while avoiding vLLM/PyTorch numerical drift)
-  - reverse KL: exp(ref-cur) - (ref-cur) - 1 (consistent with ms-swift grpo_trainer.py:1126)
+  - reverse KL: exp(ref-cur) - (ref-cur) - 1
   - loss aggregation: (sum(loss*token_weights) / sum(token_weights)).mean()
-      (consistent with ms-swift grpo_trainer.py:1228; here token_weights extends the original completion_mask
+      (here token_weights extends the original completion_mask
         defaulting to the same 0/1 mask while allowing turn_loss_weights to assign different weights to different turns)
 """
 
@@ -45,11 +45,9 @@ def compute_policy_logps(
     """
     Run the forward pass and compute policy log probabilities, token-level valid weights, and Shannon entropy.
 
-    Aligned with ms-swift in the following ways:
+    Design notes:
       - logits_to_keep optimization: keep only completion-region logits and skip the prompt
-          (see the logits_to_keep computation in ms-swift grpo_trainer.py:880)
       - temperature scaling: logits /= temperature
-          (see ms-swift grpo_trainer.py:1619)
 
     Args:
         model:          language model
@@ -72,7 +70,7 @@ def compute_policy_logps(
           - by default it is equivalent to a 0/1 completion mask
           - when turn_loss_weights is enabled, assistant tokens are multiplied by different per-turn coefficients
     """
-    # logits_to_keep: keep only the completion region and skip the prompt (aligned with ms-swift)
+    # logits_to_keep: keep only the completion region and skip the prompt
     # labels layout: [-100, ..., -100, tok1, ..., tokN, -100, ..., -100]
     #               ^^^prompt^^^     ^^^completion^^^   ^^^padding^^^
     # argmax finds the first position != -100, and L minus that position gives the number of tokens to keep
@@ -94,7 +92,7 @@ def compute_policy_logps(
     # logits[t] predicts input_ids[t+1], so K+1 logits are needed to obtain K logprobs
     logits = logits[:, -(logits_to_keep + 1):, :]  # [B, K+1, V]
 
-    # Temperature scaling (aligned with ms-swift; no effect when temperature=1.0)
+    # Temperature scaling (no effect when temperature=1.0)
     if temperature != 1.0:
         logits = logits / temperature
 
@@ -115,7 +113,6 @@ def compute_policy_logps(
     token_weights = shift_weights * (shift_labels != -100).float()  # [B, K]
 
     # Shannon entropy: -∑ p_i log p_i
-    # Reference: entropy_from_logits in ms-swift swift/rlhf_trainers/utils.py:657
     # Chunk along the sequence dimension (64 positions per chunk) to avoid materializing the full [B, K, V] tensor and causing OOM
     _ENT_SEQ_CHUNK = 64
     chunk_entropies = []
@@ -130,7 +127,7 @@ def compute_policy_logps(
 
 
 # ---------------------------------------------------------------------------
-# GRPO loss (token-level importance sampling; see ms-swift grpo_trainer.py with loss_type='grpo')
+# GRPO loss (token-level importance sampling)
 # ---------------------------------------------------------------------------
 
 def grpo_loss(
@@ -146,14 +143,14 @@ def grpo_loss(
     """
     GRPO PPO-clip loss with token-level importance sampling, plus an optional KL(pi_ref || pi) penalty.
 
-    Aligned with ms-swift in the following ways:
+    Uses the standard GRPO PPO-clip form:
         coef_1 = exp(log_ratio)                           per token
         coef_2 = clamp(coef_1, 1 - epsilon, 1 + epsilon)
         per_token_loss = -min(coef_1 * adv, coef_2 * adv)
         loss = mean_over_samples( sum(loss * token_weights) / sum(token_weights) )
 
     KL penalty (when ref_logps is not None and kl_beta > 0):
-        Use reverse KL as in ms-swift (always >= 0):
+        Use reverse KL (always >= 0):
         per_token_kl = exp(log π_ref - log π_θ) - (log π_ref - log π_θ) - 1
         per_token_loss += β * per_token_kl
 
@@ -182,7 +179,7 @@ def grpo_loss(
     adv_expanded = advantages.unsqueeze(1)  # [B, 1]
     per_token_loss = -torch.min(coef_1 * adv_expanded, coef_2 * adv_expanded)  # [B, K]
 
-    # ── KL(pi_ref || pi) Penalty (Reverse KL, Aligned With ms-swift) ──────────────────
+    # ── KL(pi_ref || pi) Penalty (Reverse KL) ──────────────────
     # Note: this is the KL against the frozen reference model, not the old-policy approx_kl from the PPO line.
     # It is added to the loss directly and anchors the current policy near the initial reference, preventing policy drift.
     # Formula: exp(log pi_ref - log pi_theta) - (log pi_ref - log pi_theta) - 1, which is always >= 0
@@ -249,12 +246,11 @@ def train_step(
     Within a batch, the B samples are split into chunks of config.train_micro_batch_size for forward/backward passes,
     gradients accumulate naturally across chunks, and clipping + stepping are performed once at the end.
 
-    Key points aligned with ms-swift:
+    Key points:
       - old_logprobs uses per_token_logps.detach() (on-policy, num_iterations=1)
-        ms-swift computes old_logprobs through a training-model forward pass inside _prepare_batch_inputs,
         and for num_iterations=1 that result is mathematically equivalent to per_token_logps.detach().
-      - ref_logprobs uses a forward pass of the frozen reference model (consistent with ms-swift)
-      - temperature is passed into compute_policy_logps (consistent with ms-swift)
+      - ref_logprobs uses a forward pass of the frozen reference model
+      - temperature is passed into compute_policy_logps
 
     Args:
         is_opt_step: whether to execute optimizer.step() + zero_grad.
@@ -280,7 +276,7 @@ def train_step(
     loss_weights   = batch["loss_weights"].to(device)
     advantages     = batch["advantages"].to(device)
     # old_logprobs_aligned is no longer used: in on-policy mode it is replaced with per_token_logps.detach()
-    # (avoids numerical mismatch between vLLM and PyTorch and is equivalent to ms-swift at num_iterations=1)
+    # (avoids numerical mismatch between vLLM and PyTorch and is equivalent at num_iterations=1)
 
     total_samples = input_ids.size(0)
     train_micro_batch_size = config.train_micro_batch_size
@@ -326,8 +322,8 @@ def train_step(
 
             # On-policy: old_logprobs = current-policy logprobs
             # Model weights do not change during accumulation (optimizer has not stepped yet),
-            # so per_token_logps.detach() is mathematically equivalent to the result ms-swift gets by using the training model for a separate forward pass
-            # to compute old_logprobs separately (and is more efficient because it saves one forward pass).
+            # so per_token_logps.detach() is mathematically equivalent to a separate old_logprobs forward pass
+            # while being more efficient because it saves one extra pass.
             # Therefore:
             #   - old-policy approx_kl (metrics["kl"]) is usually close to 0
             #   - clip_frac is usually close to 0

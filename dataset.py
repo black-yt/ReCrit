@@ -1,7 +1,7 @@
 """
 ReCrit dataset module.
 
-Loads JSONL files in ms-swift format or a simplified QA format,
+Loads JSONL files in a chat-style format or a simplified QA format,
 and returns a list of {"question": str, "answer": str, "judge_mode": str}.
 """
 
@@ -16,7 +16,7 @@ logger = logging.getLogger(__name__)
 class QADataset(Dataset):
     """
     Load a JSONL file in either of the following formats:
-      1. ms-swift format (the actual training-data format):
+      1. chat-style training format:
             {"messages": [{"role": "user", "content": "..."}], "answer": "...", "judge_mode": "close"}
          question is extracted from messages[0]["content"], preserving the full Format Requirements block
       2. simplified alias-based format:
@@ -66,7 +66,7 @@ class QADataset(Dataset):
                 obj = json.loads(line)
 
                 # -- Extract question --
-                # First try the first user message in messages (ms-swift format)
+                # First try the first user message in messages (chat-style format)
                 q = None
                 if "messages" in obj and isinstance(obj["messages"], list):
                     for msg in obj["messages"]:

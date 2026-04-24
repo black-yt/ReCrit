@@ -94,7 +94,6 @@ class ReCritConfig:
                                             #   Must be <= vllm_max_model_len
     gradient_accumulation_steps: int = 4   # Gradient accumulation steps. Perform one
                                             #   optimizer.step() every N rollout batches, increasing the effective batch size by a factor of N.
-                                            #   Reference: ms-swift commonly uses gradient_accumulation_steps=16
 
     # ── Training Efficiency ──────────────────────────────────────────────────────────────
     gradient_checkpointing: bool = True     # Gradient checkpointing (saves memory; recommended)

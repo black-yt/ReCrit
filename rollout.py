@@ -33,7 +33,7 @@ import torch.nn as nn
 logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
-# Critic templates (kept aligned with plugin/rewards.py)
+# Critic templates
 # ---------------------------------------------------------------------------
 
 ATTITUDE_TEMPLATES: Dict[str, List[str]] = {

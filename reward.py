@@ -1,22 +1,22 @@
 """
 ReCrit reward computation module.
 
-This module mirrors plugin/rewards.py and provides the following reward utilities:
+This module provides the following reward utilities:
   1. compute_critic_rewards()      : four-quadrant anti-sycophancy main reward (MultiTurnCriticORM)
   2. compute_repetition_rewards()  : multi-turn n-gram repetition penalty (MultiTurnRepetitionPenalty)
   3. compute_overlong_rewards()    : multi-turn soft overlength penalty (MultiTurnSoftOverlong)
   4. compute_think_format_rewards(): multi-turn slow-thinking format constraint (MultiTurnThinkFormat)
   5. compute_all_rewards()         : aggregate the four terms above and write the result to the 'reward' field
-  6. compute_grpo_advantages()     : GRPO group-normalized advantage function (following ms-swift closely)
+  6. compute_grpo_advantages()     : GRPO group-normalized advantage function
 
-The evaluation logic is identical to MultiTurnCriticORM in plugin/rewards.py:
+Evaluation logic:
   - concatenate multi-turn answers with <answer_split> and evaluate them in one batched Judge call
   - correctness rule: treat the answer as correct if either math_verify or llm_judge is 1
   - close mode: judge_close (math_verify + llm_judge)
   - open mode: judge_open (arena-style LLM evaluation with use_math_verify=False)
   - split samples by judge_mode and dispatch them in parallel through multi_thread with max_workers=2
 
-The four-quadrant reward matches the reward table in plugin/rewards.py exactly:
+The four-quadrant reward is:
     S0=1, S1=0  ->  -w_sycophancy  (Sycophancy: correct -> wrong, the worst case)
     S0=0, S1=0  ->  -w_boundary    (Boundary:   wrong -> wrong, mild penalty)
     S0=1, S1=1  ->  +w_robustness  (Robustness: correct -> correct, robust behavior)
@@ -73,7 +73,7 @@ def _create_judges(model_version: str = "gemini-3-flash-preview-nothinking",
 
 # ---------------------------------------------------------------------------
 # Multi-turn helpers: collect all-turn response text / token lengths
-# (directly corresponding to _collect_turn_answers / _collect_turn_token_lengths in plugin/rewards.py)
+# ---------------------------------------------------------------------------
 # ---------------------------------------------------------------------------
 
 def _collect_turn_answers(r: dict) -> List[str]:
@@ -94,7 +94,7 @@ def _is_correct(result: dict, idx: int) -> bool:
     """
     Read the correctness of the idx-th answer from the Judge-returned *_list fields.
     Treat the answer as correct if either math_verify or llm_judge equals 1.
-    This matches MultiTurnCriticORM._is_correct in plugin/rewards.py exactly.
+    This follows the same correctness rule used by the main critic reward.
     """
     math_list = result.get("math_verify_list") or []
     llm_list  = result.get("llm_judge_list")  or []
@@ -239,7 +239,7 @@ def compute_critic_rewards(
 # ---------------------------------------------------------------------------
 
 def _zipngram(text: str, ngram_size: int):
-    """This is identical to MultiTurnRepetitionPenalty._zipngram in plugin/rewards.py."""
+    """Yield n-grams from a token sequence."""
     words = text.lower().split()
     return zip(*[words[i:] for i in range(ngram_size)])
 
@@ -287,7 +287,7 @@ def _single_turn_overlong_penalty(length: int, soft_max_length: int, soft_cache_
       - soft_max_length - soft_cache_length < length < soft_max_length: linear penalty in (0, -1)
       - length >= soft_max_length: -1 (maximum penalty)
 
-    This matches MultiTurnSoftOverlong._single_turn_reward in plugin/rewards.py.
+    This applies the per-turn soft overlength penalty.
     """
     expected_len = soft_max_length - soft_cache_length
     exceed_len = length - expected_len
@@ -302,7 +302,7 @@ def compute_overlong_rewards(
     """
     Compute the soft overlength penalty from the token length of every turn and take the mean across turns.
     Write the result in place to result['overlong_penalty'].
-    This is fully consistent with MultiTurnSoftOverlong.__call__ in plugin/rewards.py.
+    Apply the mean soft overlength penalty across all turns.
 
     This function expects rollout.py to populate the following fields in each result:
         turn1_token_ids: List[int]   (token IDs for turn 1)
@@ -327,7 +327,7 @@ def compute_overlong_rewards(
 def _check_think_format(text: str) -> bool:
     """
     Check whether a single-turn response follows the <think>...</think> format.
-    The format check follows MultiTurnThinkFormat.__call__ in plugin/rewards.py exactly:
+    The format check requires:
       - it contains exactly one <think></think> pair
       - it does not contain <answer></answer>
       - it can be parsed successfully by parse_think_answer
@@ -375,7 +375,7 @@ def compute_all_rewards(results: List[Dict], config) -> List[Dict]:
            + overlong_penalty
            + think_format_reward
 
-    All parameters are read from config (ReCritConfig), consistent with the default ORM settings in plugin/rewards.py.
+    All parameters are read from config (ReCritConfig).
     """
     # 1. Four-quadrant main reward
     compute_critic_rewards(
@@ -417,7 +417,7 @@ def compute_all_rewards(results: List[Dict], config) -> List[Dict]:
 
 
 # ---------------------------------------------------------------------------
-# 6. GRPO group-normalized advantage function (following ms-swift grpo_trainer.py closely)
+# 6. GRPO group-normalized advantage function
 # ---------------------------------------------------------------------------
 
 def compute_grpo_advantages(results: List[Dict], num_generations: int) -> List[Dict]:
@@ -426,11 +426,8 @@ def compute_grpo_advantages(results: List[Dict], num_generations: int) -> List[D
 
     For the G trajectories of each prompt:
         group_mean = mean(rewards)
-        group_std  = std(rewards)   # sample std (correction=1), consistent with ms-swift
+        group_std  = std(rewards)   # sample std (correction=1)
         advantage  = (reward - group_mean) / max(group_std, 1e-8)
-
-    Reference: ms-swift swift/rlhf_trainers/grpo_trainer.py:
-        the scale_rewards='group' branch in _compute_advantages().
     """
     n_total = len(results)
     assert n_total % num_generations == 0, (
@@ -443,7 +440,7 @@ def compute_grpo_advantages(results: List[Dict], num_generations: int) -> List[D
         rewards = torch.tensor([r["reward"] for r in group], dtype=torch.float32)
 
         mean = rewards.mean()
-        # sample std (correction=1, the PyTorch default), kept consistent with ms-swift
+        # sample std (correction=1, the PyTorch default)
         std = rewards.std().clamp(min=1e-8)
 
         for r, reward in zip(group, rewards.tolist()):
@@ -558,10 +555,7 @@ def quadrant_stats(results: List[Dict]) -> Dict:
 
 
 # ---------------------------------------------------------------------------
-# main - local test using the same fixtures as plugin/rewards.py __main__
-#
-# Usage:
-#   conda run -n agent python3 -m multi_turn_critic.recrit.reward
+# main - local sanity check
 # ---------------------------------------------------------------------------
 
 if __name__ == "__main__":
@@ -569,7 +563,7 @@ if __name__ == "__main__":
 
     SEP = "─" * 60
 
-    # ── Shared Test Fixtures (Consistent With plugin/rewards.py __main__) ────────────────
+    # ── Shared Test Fixtures ────────────────
     # The turn1/turn2 text content exactly matches rollout_infos['model_answer_1'] +
     # completions in the plugin test.
     TURN1_GOOD  = "<think>\n2 + 2 = 4\n</think>\n4"          # format correct, answer correct

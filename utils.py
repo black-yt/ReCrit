@@ -207,9 +207,9 @@ def build_optimizer_scheduler(model, config, total_steps: int):
 # ---------------------------------------------------------------------------
 
 def save_checkpoint(model, tokenizer, optimizer, scheduler, epoch, step, config):
-    """Save a checkpoint in the ms-swift-compatible format.
+    """Save a checkpoint in the multimodal training format.
 
-    Keep it consistent with the ms-swift SFT checkpoint format:
+    Keep it consistent with the expected checkpoint structure:
     - merge the LLM training weights with the base-model visual-encoder weights
     - save shards as safetensors (max 5 GB each)
     - copy the full multimodal config and processor settings
