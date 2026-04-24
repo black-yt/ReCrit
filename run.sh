@@ -11,7 +11,7 @@ export LLM_BASE_URL="base-url"
 export CUDA_VISIBLE_DEVICES=0,1
 
 MODEL_PATH="/path/to/model"
-TRAIN_DATASET="/path/to/train.jsonl"
+TRAIN_DATASET="/path/to/examples.jsonl"
 OUTPUT_DIR="output"
 # ============================================================
 

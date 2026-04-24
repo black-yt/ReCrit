@@ -65,7 +65,7 @@ events.out.tfevents*
 # Keep the public sample data under version control.
 !data/
 !data/train/
-!data/train/train.jsonl
+!data/train/examples.jsonl
 !data/eval/
 !data/eval/logs.jsonl
 

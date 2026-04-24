@@ -91,7 +91,7 @@ Prepare a JSONL training file and run:
 
 ```bash
 export MODEL_PATH=/path/to/model
-export TRAIN_DATASET=/path/to/train.jsonl
+export TRAIN_DATASET=/path/to/examples.jsonl
 export OUTPUT_DIR=output/recrit
 export LLM_API_KEY=YOUR_LLM_API_KEY
 export LLM_BASE_URL=https://your-judge-endpoint/v1
