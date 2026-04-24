@@ -67,7 +67,7 @@ events.out.tfevents*
 !data/train/
 !data/train/examples.jsonl
 !data/eval/
-!data/eval/logs.jsonl
+!data/eval/examples.jsonl
 
 # Translations
 *.mo
